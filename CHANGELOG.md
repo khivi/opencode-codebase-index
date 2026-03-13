@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Call graph extraction and query**: Tree-sitter query-based extraction of function calls, method calls, constructors, and imports across 5 languages (TypeScript/JavaScript, Python, Go, Rust)
+- **`call_graph` tool**: Query callers or callees of any function/method with branch-aware filtering
+- **DB schema v2**: `symbols`, `call_edges`, and `branch_symbols` tables with full CRUD, GC, and batch operations
+- **Same-file call resolution**: Automatically resolves call edges to symbols defined in the same file during indexing
+
+### Fixed
+- **Missing `call_graph` export**: The `call_graph` tool was not exported from the plugin entry point — now available to OpenCode users
+
 ## [0.5.0] - 2026-02-23
 
 ### Added

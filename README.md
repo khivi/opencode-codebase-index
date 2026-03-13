@@ -82,7 +82,7 @@ Use the same semantic search from any MCP-compatible client. Index once, search 
    npx opencode-codebase-index-mcp                            # uses current directory
    ```
 
-The MCP server exposes all 8 tools (`codebase_search`, `codebase_peek`, `find_similar`, `index_codebase`, `index_status`, `index_health_check`, `index_metrics`, `index_logs`) and 4 prompts (`search`, `find`, `index`, `status`).
+The MCP server exposes all 9 tools (`codebase_search`, `codebase_peek`, `find_similar`, `call_graph`, `index_codebase`, `index_status`, `index_health_check`, `index_metrics`, `index_logs`) and 4 prompts (`search`, `find`, `index`, `status`).
 
 The MCP dependencies (`@modelcontextprotocol/sdk`, `zod`) are optional peer dependencies — they're only needed if you use the MCP server.
 
@@ -112,6 +112,7 @@ src/api/checkout.ts:89      (Route handler for /pay)
 | Don't know the function name | `codebase_search` | Semantic search finds by meaning |
 | Exploring unfamiliar codebase | `codebase_search` | Discovers related code across files |
 | Just need to find locations | `codebase_peek` | Returns metadata only, saves ~90% tokens |
+| Understand code flow | `call_graph` | Find callers/callees of any function |
 | Know exact identifier | `grep` | Faster, finds all occurrences |
 | Need ALL matches | `grep` | Semantic returns top N only |
 | Mixed discovery + precision | `/find` (hybrid) | Best of both worlds |
@@ -211,7 +212,7 @@ When you switch branches, code changes but embeddings for unchanged content rema
 
 ```
 .opencode/index/
-├── codebase.db           # SQLite: embeddings, chunks, branch catalog
+├── codebase.db           # SQLite: embeddings, chunks, branch catalog, symbols, call edges
 ├── vectors.usearch       # Vector index (uSearch)
 ├── inverted-index.json   # BM25 keyword index
 └── file-hashes.json      # File change detection
@@ -266,6 +267,12 @@ Returns collected metrics about indexing and search performance. Requires `debug
 ### `index_logs`
 Returns recent debug logs with optional filtering.
 - **Parameters**: `category` (optional: `search`, `embedding`, `cache`, `gc`, `branch`), `level` (optional: `error`, `warn`, `info`, `debug`), `limit` (default: 50).
+
+### `call_graph`
+Query the call graph to find callers or callees of a function/method. Automatically built during indexing for TypeScript, JavaScript, Python, Go, and Rust.
+- **Use for**: Understanding code flow, tracing dependencies, impact analysis.
+- **Parameters**: `name` (function name), `direction` (`callers` or `callees`), `symbolId` (required for `callees`, returned by previous queries).
+- **Example**: Find who calls `validateToken` → `call_graph(name="validateToken", direction="callers")`
 
 ## 🎮 Slash Commands
 
@@ -564,8 +571,9 @@ CI will automatically run tests and type checking on your PR.
 The Rust native module handles performance-critical operations:
 - **tree-sitter**: Language-aware code parsing with JSDoc/docstring extraction
 - **usearch**: High-performance vector similarity search with F16 quantization
-- **SQLite**: Persistent storage for embeddings, chunks, and branch catalog
+- **SQLite**: Persistent storage for embeddings, chunks, branch catalog, symbols, and call edges
 - **BM25 inverted index**: Fast keyword search for hybrid retrieval
+- **Call graph extraction**: Tree-sitter query-based extraction of function calls, method calls, constructors, and imports (TypeScript/JavaScript, Python, Go, Rust)
 - **xxhash**: Fast content hashing for change detection
 
 Rebuild with: `npm run build:native` (requires Rust toolchain)
