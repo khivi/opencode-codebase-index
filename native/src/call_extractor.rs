@@ -42,10 +42,12 @@ pub fn extract_calls(content: &str, language_name: &str) -> Result<Vec<CallSite>
         .ok_or_else(|| anyhow!("Parse failed"))?;
 
     let query_source = match language {
-        Language::TypeScript
-        | Language::TypeScriptTsx
-        | Language::JavaScript
-        | Language::JavaScriptJsx => include_str!("../queries/typescript-calls.scm"),
+        Language::TypeScript | Language::TypeScriptTsx => {
+            include_str!("../queries/typescript-calls.scm")
+        }
+        Language::JavaScript | Language::JavaScriptJsx => {
+            include_str!("../queries/javascript-calls.scm")
+        }
         Language::Python => include_str!("../queries/python-calls.scm"),
         Language::Rust => include_str!("../queries/rust-calls.scm"),
         Language::Go => include_str!("../queries/go-calls.scm"),
