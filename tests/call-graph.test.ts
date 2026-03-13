@@ -383,6 +383,66 @@ describe("call-graph", () => {
       expect(callees[0].isResolved).toBe(true);
       expect(callees[0].toSymbolId).toBe("sym_helper_a");
     });
+
+    it("should keep ambiguous same-file target unresolved", () => {
+      const db = new Database(path.join(tempDir, "test.db"));
+
+      const symbols: SymbolData[] = [
+        {
+          id: "sym_caller_amb",
+          filePath: "/src/file.ts",
+          name: "caller",
+          kind: "function",
+          startLine: 1,
+          startCol: 0,
+          endLine: 5,
+          endCol: 0,
+          language: "typescript",
+        },
+        {
+          id: "sym_dup_1",
+          filePath: "/src/file.ts",
+          name: "dup",
+          kind: "function",
+          startLine: 7,
+          startCol: 0,
+          endLine: 10,
+          endCol: 0,
+          language: "typescript",
+        },
+        {
+          id: "sym_dup_2",
+          filePath: "/src/file.ts",
+          name: "dup",
+          kind: "function",
+          startLine: 12,
+          startCol: 0,
+          endLine: 15,
+          endCol: 0,
+          language: "typescript",
+        },
+      ];
+      db.upsertSymbolsBatch(symbols);
+
+      const edges: CallEdgeData[] = [
+        {
+          id: "edge_ambiguous",
+          fromSymbolId: "sym_caller_amb",
+          targetName: "dup",
+          callType: "Call",
+          line: 3,
+          col: 2,
+          isResolved: false,
+        },
+      ];
+      db.upsertCallEdgesBatch(edges);
+
+      db.addSymbolsToBranchBatch("test", ["sym_caller_amb", "sym_dup_1", "sym_dup_2"]);
+      const callees = db.getCallees("sym_caller_amb", "test");
+      expect(callees.length).toBe(1);
+      expect(callees[0].isResolved).toBe(false);
+      expect(callees[0].toSymbolId).toBeUndefined();
+    });
   });
 
   describe("branch awareness", () => {
