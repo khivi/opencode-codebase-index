@@ -160,7 +160,7 @@ fn migrate_schema(conn: &Connection, from_version: i32) -> DbResult<()> {
             params![SCHEMA_VERSION.to_string()],
         )?;
     }
-    if from_version >= 2 && from_version < 3 {
+    if (2..3).contains(&from_version) {
         conn.execute_batch(
             r#"
             PRAGMA foreign_keys = OFF;
