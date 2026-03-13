@@ -809,8 +809,8 @@ impl Database {
             .conn
             .lock()
             .map_err(|e| Error::from_reason(e.to_string()))?;
-        let rows =
-            db::get_callees(&conn, &symbol_id, &branch).map_err(|e| Error::from_reason(e.to_string()))?;
+        let rows = db::get_callees(&conn, &symbol_id, &branch)
+            .map_err(|e| Error::from_reason(e.to_string()))?;
         Ok(rows
             .into_iter()
             .map(|r| CallEdgeData {
