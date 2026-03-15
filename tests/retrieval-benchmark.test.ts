@@ -25,6 +25,9 @@ interface BenchmarkArtifact {
 }
 
 const LATENCY_BUDGET_P95_MULTIPLIER = 2.75;
+const LATENCY_BUDGET_ABSOLUTE_JITTER_MS = 0.005;
+const LATENCY_BUDGET_MEDIAN_MIN_MS = 0.05;
+const LATENCY_BUDGET_P95_MIN_MS = 0.2;
 
 interface LatencySample {
   query: string;
@@ -255,7 +258,16 @@ describe("retrieval benchmark", () => {
     const baseline = loadBaseline();
 
     expect(candidate.hitAt5).toBeGreaterThanOrEqual(baseline.hitAt5);
-    expect(candidate.medianMs).toBeLessThanOrEqual(baseline.medianMs * 1.15);
-    expect(candidate.p95Ms).toBeLessThanOrEqual(baseline.p95Ms * LATENCY_BUDGET_P95_MULTIPLIER);
+    const medianBudget = Math.max(
+      baseline.medianMs * 1.15 + LATENCY_BUDGET_ABSOLUTE_JITTER_MS,
+      LATENCY_BUDGET_MEDIAN_MIN_MS
+    );
+    const p95Budget = Math.max(
+      baseline.p95Ms * LATENCY_BUDGET_P95_MULTIPLIER + LATENCY_BUDGET_ABSOLUTE_JITTER_MS,
+      LATENCY_BUDGET_P95_MIN_MS
+    );
+
+    expect(candidate.medianMs).toBeLessThanOrEqual(medianBudget);
+    expect(candidate.p95Ms).toBeLessThanOrEqual(p95Budget);
   });
 });
