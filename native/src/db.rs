@@ -479,6 +479,62 @@ pub fn get_chunks_by_file(conn: &Connection, file_path: &str) -> DbResult<Vec<Ch
     Ok(results)
 }
 
+pub fn get_chunks_by_name(conn: &Connection, name: &str) -> DbResult<Vec<ChunkRow>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT chunk_id, content_hash, file_path, start_line, end_line, node_type, name, language
+        FROM chunks WHERE name = ?
+        "#,
+    )?;
+
+    let rows = stmt.query_map(params![name], |row| {
+        Ok(ChunkRow {
+            chunk_id: row.get(0)?,
+            content_hash: row.get(1)?,
+            file_path: row.get(2)?,
+            start_line: row.get(3)?,
+            end_line: row.get(4)?,
+            node_type: row.get(5)?,
+            name: row.get(6)?,
+            language: row.get(7)?,
+        })
+    })?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        results.push(row?);
+    }
+    Ok(results)
+}
+
+pub fn get_chunks_by_name_ci(conn: &Connection, name: &str) -> DbResult<Vec<ChunkRow>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT chunk_id, content_hash, file_path, start_line, end_line, node_type, name, language
+        FROM chunks WHERE lower(name) = lower(?)
+        "#,
+    )?;
+
+    let rows = stmt.query_map(params![name], |row| {
+        Ok(ChunkRow {
+            chunk_id: row.get(0)?,
+            content_hash: row.get(1)?,
+            file_path: row.get(2)?,
+            start_line: row.get(3)?,
+            end_line: row.get(4)?,
+            node_type: row.get(5)?,
+            name: row.get(6)?,
+            language: row.get(7)?,
+        })
+    })?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        results.push(row?);
+    }
+    Ok(results)
+}
+
 /// Delete chunks for a file
 pub fn delete_chunks_by_file(conn: &Connection, file_path: &str) -> DbResult<usize> {
     let count = conn.execute("DELETE FROM chunks WHERE file_path = ?", params![file_path])?;
@@ -785,6 +841,64 @@ pub fn get_symbol_by_name(
         )
         .optional()?;
     Ok(result)
+}
+
+pub fn get_symbols_by_name(conn: &Connection, name: &str) -> DbResult<Vec<SymbolRow>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT id, file_path, name, kind, start_line, start_col, end_line, end_col, language
+        FROM symbols WHERE name = ?
+        "#,
+    )?;
+
+    let rows = stmt.query_map(params![name], |row| {
+        Ok(SymbolRow {
+            id: row.get(0)?,
+            file_path: row.get(1)?,
+            name: row.get(2)?,
+            kind: row.get(3)?,
+            start_line: row.get(4)?,
+            start_col: row.get(5)?,
+            end_line: row.get(6)?,
+            end_col: row.get(7)?,
+            language: row.get(8)?,
+        })
+    })?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        results.push(row?);
+    }
+    Ok(results)
+}
+
+pub fn get_symbols_by_name_ci(conn: &Connection, name: &str) -> DbResult<Vec<SymbolRow>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT id, file_path, name, kind, start_line, start_col, end_line, end_col, language
+        FROM symbols WHERE lower(name) = lower(?)
+        "#,
+    )?;
+
+    let rows = stmt.query_map(params![name], |row| {
+        Ok(SymbolRow {
+            id: row.get(0)?,
+            file_path: row.get(1)?,
+            name: row.get(2)?,
+            kind: row.get(3)?,
+            start_line: row.get(4)?,
+            start_col: row.get(5)?,
+            end_line: row.get(6)?,
+            end_col: row.get(7)?,
+            language: row.get(8)?,
+        })
+    })?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        results.push(row?);
+    }
+    Ok(results)
 }
 
 /// Delete all symbols for a file
@@ -1341,6 +1455,14 @@ mod tests {
         assert!(found.is_some());
         assert_eq!(found.unwrap().id, "sym1");
 
+        let by_name = get_symbols_by_name(&conn, "handleRequest").unwrap();
+        assert_eq!(by_name.len(), 1);
+        assert_eq!(by_name[0].id, "sym1");
+
+        let by_name_ci = get_symbols_by_name_ci(&conn, "handlerequest").unwrap();
+        assert_eq!(by_name_ci.len(), 1);
+        assert_eq!(by_name_ci[0].id, "sym1");
+
         // Not found
         let missing = get_symbol_by_name(&conn, "missing", "src/main.ts").unwrap();
         assert!(missing.is_none());
@@ -1399,6 +1521,10 @@ mod tests {
         let file_b = get_symbols_by_file(&conn, "src/b.ts").unwrap();
         assert_eq!(file_b.len(), 1);
         assert_eq!(file_b[0].kind, "class");
+
+        let foo = get_symbols_by_name(&conn, "foo").unwrap();
+        assert_eq!(foo.len(), 1);
+        assert_eq!(foo[0].id, "s1");
     }
 
     #[test]

@@ -1,0 +1,76 @@
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
+
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+
+import { parseConfig } from "../src/config/schema.js";
+import { Indexer } from "../src/indexer/index.js";
+
+describe("search integration", () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "search-integration-"));
+
+    fs.mkdirSync(path.join(tempDir, "app", "indexer"), { recursive: true });
+    fs.mkdirSync(path.join(tempDir, "tests", "fixtures", "call-graph"), { recursive: true });
+    fs.mkdirSync(path.join(tempDir, "benchmarks"), { recursive: true });
+
+    fs.writeFileSync(
+      path.join(tempDir, "app", "indexer", "index.ts"),
+      `export function rankHybridResults(query: string) { return query.length; }
+export function rerankResults(query: string) { return rankHybridResults(query); }
+`,
+      "utf-8"
+    );
+
+    fs.writeFileSync(
+      path.join(tempDir, "tests", "fixtures", "call-graph", "same-file-refs.ts"),
+      `function entryPoint() { return "where is rankHybridResults implementation fixture rankHybridResults"; }
+`,
+      "utf-8"
+    );
+
+    fs.writeFileSync(
+      path.join(tempDir, "benchmarks", "run.ts"),
+      `export function runBenchmarks() { return "rankHybridResults benchmark implementation"; }
+`,
+      "utf-8"
+    );
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("returns implementation definitions before fixture/benchmark noise for implementation-intent query", async () => {
+    const config = parseConfig({
+      embeddingProvider: "mock",
+      indexing: {
+        watchFiles: false,
+      },
+      search: {
+        maxResults: 10,
+        minScore: 0,
+        fusionStrategy: "rrf",
+        rrfK: 60,
+        rerankTopN: 20,
+      },
+    });
+
+    const indexer = new Indexer(tempDir, config);
+    const stats = await indexer.index();
+    expect(stats.totalFiles).toBeGreaterThan(0);
+
+    const results = await indexer.search("where is rankHybridResults implementation", 5, {
+      metadataOnly: true,
+      filterByBranch: false,
+    });
+
+    const topPaths = results.slice(0, 3).map((r) => r.filePath);
+    expect(topPaths[0]).toContain("/app/indexer/index.ts");
+    expect(topPaths).not.toContain("/tests/fixtures/call-graph/same-file-refs.ts");
+    expect(topPaths).not.toContain("/benchmarks/run.ts");
+  });
+});

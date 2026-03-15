@@ -468,6 +468,52 @@ impl Database {
     }
 
     #[napi]
+    pub fn get_chunks_by_name(&self, name: String) -> Result<Vec<ChunkData>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        let rows =
+            db::get_chunks_by_name(&conn, &name).map_err(|e| Error::from_reason(e.to_string()))?;
+        Ok(rows
+            .into_iter()
+            .map(|row| ChunkData {
+                chunk_id: row.chunk_id,
+                content_hash: row.content_hash,
+                file_path: row.file_path,
+                start_line: row.start_line,
+                end_line: row.end_line,
+                node_type: row.node_type,
+                name: row.name,
+                language: row.language,
+            })
+            .collect())
+    }
+
+    #[napi]
+    pub fn get_chunks_by_name_ci(&self, name: String) -> Result<Vec<ChunkData>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        let rows = db::get_chunks_by_name_ci(&conn, &name)
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        Ok(rows
+            .into_iter()
+            .map(|row| ChunkData {
+                chunk_id: row.chunk_id,
+                content_hash: row.content_hash,
+                file_path: row.file_path,
+                start_line: row.start_line,
+                end_line: row.end_line,
+                node_type: row.node_type,
+                name: row.name,
+                language: row.language,
+            })
+            .collect())
+    }
+
+    #[napi]
     pub fn delete_chunks_by_file(&self, file_path: String) -> Result<u32> {
         let conn = self
             .conn
@@ -751,6 +797,54 @@ impl Database {
             end_col: r.end_col,
             language: r.language,
         }))
+    }
+
+    #[napi]
+    pub fn get_symbols_by_name(&self, name: String) -> Result<Vec<SymbolData>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        let rows =
+            db::get_symbols_by_name(&conn, &name).map_err(|e| Error::from_reason(e.to_string()))?;
+        Ok(rows
+            .into_iter()
+            .map(|r| SymbolData {
+                id: r.id,
+                file_path: r.file_path,
+                name: r.name,
+                kind: r.kind,
+                start_line: r.start_line,
+                start_col: r.start_col,
+                end_line: r.end_line,
+                end_col: r.end_col,
+                language: r.language,
+            })
+            .collect())
+    }
+
+    #[napi]
+    pub fn get_symbols_by_name_ci(&self, name: String) -> Result<Vec<SymbolData>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        let rows = db::get_symbols_by_name_ci(&conn, &name)
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        Ok(rows
+            .into_iter()
+            .map(|r| SymbolData {
+                id: r.id,
+                file_path: r.file_path,
+                name: r.name,
+                kind: r.kind,
+                start_line: r.start_line,
+                start_col: r.start_col,
+                end_line: r.end_line,
+                end_col: r.end_col,
+                language: r.language,
+            })
+            .collect())
     }
 
     #[napi]

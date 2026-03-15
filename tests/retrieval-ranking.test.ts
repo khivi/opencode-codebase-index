@@ -2,10 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import type { ChunkMetadata } from "../src/native/index.js";
 import {
+  extractFilePathHint,
   fuseResultsRrf,
   fuseResultsWeighted,
-  rerankResults,
+  mergeTieredResults,
   rankHybridResults,
+  stripFilePathHint,
+  rerankResults,
   rankSemanticOnlyResults,
 } from "../src/indexer/index.js";
 
@@ -38,6 +41,8 @@ describe("retrieval ranking", () => {
 
     const fused = fuseResultsRrf(semantic, keyword, 60, 10);
     expect(fused.map(r => r.id).slice(0, 3)).toEqual(["a", "c", "d"]);
+    expect(fused[0]?.score ?? 0).toBeLessThanOrEqual(1);
+    expect(fused[0]?.score ?? 0).toBeGreaterThan(0);
   });
 
   it("keeps both semantic-only and keyword-only candidates in top fused results", () => {
@@ -55,6 +60,10 @@ describe("retrieval ranking", () => {
     expect(top3[0]).toBe("both");
     expect(top3).toContain("semanticOnly");
     expect(top3).toContain("keywordOnly");
+    for (const result of fused) {
+      expect(result.score).toBeGreaterThanOrEqual(0);
+      expect(result.score).toBeLessThanOrEqual(1);
+    }
   });
 
   it("reranks deterministically using name/path/chunk-type signals", () => {
@@ -148,5 +157,167 @@ describe("retrieval ranking", () => {
 
     expect(fuseResultsRrf([], [], 60, 10)).toEqual([]);
     expect(rankSemanticOnlyResults("q", [], { rerankTopN: 10, limit: 5 })).toEqual([]);
+  });
+
+  it("prefers src implementation paths over tests/docs for implementation-intent queries", () => {
+    const candidates: Candidate[] = [
+      { id: "testCase", score: 0.92, metadata: meta({ filePath: "/repo/tests/retrieval-ranking.test.ts", name: "retrieval ranking", chunkType: "function" }) },
+      { id: "readme", score: 0.92, metadata: meta({ filePath: "/repo/README.md", name: "retrieval docs", chunkType: "other" }) },
+      { id: "srcImpl", score: 0.9, metadata: meta({ filePath: "/repo/app/indexer/index.ts", name: "rankHybridResults", chunkType: "function" }) },
+    ];
+
+    const reranked = rerankResults("where is rankHybridResults implementation", candidates, 10);
+    expect(reranked[0]?.id).toBe("srcImpl");
+  });
+
+  it("does not force src priority for doc/test-intent queries", () => {
+    const candidates: Candidate[] = [
+      { id: "srcImpl", score: 0.92, metadata: meta({ filePath: "/repo/stacks/indexer/index.ts", name: "rankHybridResults", chunkType: "function" }) },
+      { id: "readme", score: 0.9, metadata: meta({ filePath: "/repo/README.md", name: "retrieval docs", chunkType: "other" }) },
+      { id: "testCase", score: 0.89, metadata: meta({ filePath: "/repo/tests/retrieval-ranking.test.ts", name: "retrieval test", chunkType: "function" }) },
+    ];
+
+    const reranked = rerankResults("README retrieval docs", candidates, 10);
+    expect(reranked[0]?.id).toBe("readme");
+  });
+
+  it("prioritizes exact identifier hints for implementation-intent queries", () => {
+    const candidates: Candidate[] = [
+      { id: "noise1", score: 0.93, metadata: meta({ filePath: "/repo/native/src/lib.rs", name: "VectorStore", chunkType: "other" }) },
+      { id: "noise2", score: 0.92, metadata: meta({ filePath: "/repo/src/indexer/index.ts", name: "isRateLimitError", chunkType: "function" }) },
+      { id: "target", score: 0.9, metadata: meta({ filePath: "/repo/src/indexer/index.ts", name: "rankHybridResults", chunkType: "function" }) },
+    ];
+
+    const reranked = rerankResults("where is rankHybridResults implementation", candidates, 10);
+    expect(reranked[0]?.id).toBe("target");
+  });
+
+  it("promotes implementation symbol matches in hybrid ranking for identifier queries", () => {
+    const semantic: Candidate[] = [
+      { id: "noiseA", score: 0.96, metadata: meta({ filePath: "/repo/tests/fixtures/edge.ts", name: "entryPoint", chunkType: "function" }) },
+      { id: "noiseB", score: 0.95, metadata: meta({ filePath: "/repo/native/src/lib.rs", name: "VectorStore", chunkType: "other" }) },
+      { id: "target", score: 0.84, metadata: meta({ filePath: "/repo/app/indexer/index.ts", name: "rankHybridResults", chunkType: "function" }) },
+    ];
+    const keyword: Candidate[] = [
+      { id: "target", score: 0.6, metadata: meta({ filePath: "/repo/app/indexer/index.ts", name: "rankHybridResults", chunkType: "function" }) },
+      { id: "noiseA", score: 0.7, metadata: meta({ filePath: "/repo/tests/fixtures/edge.ts", name: "entryPoint", chunkType: "function" }) },
+    ];
+
+    const ranked = rankHybridResults("where is rankHybridResults implementation", semantic, keyword, {
+      fusionStrategy: "rrf",
+      rrfK: 60,
+      rerankTopN: 20,
+      limit: 5,
+      hybridWeight: 0.5,
+    });
+
+    expect(ranked[0]?.id).toBe("target");
+  });
+
+  it("keeps symbol-lane candidates ahead of hybrid lane in tiered merge", () => {
+    const symbolLane: Candidate[] = [
+      { id: "def1", score: 0.99, metadata: meta({ filePath: "/repo/app/indexer/index.ts", name: "rankHybridResults", chunkType: "function" }) },
+      { id: "def2", score: 0.88, metadata: meta({ filePath: "/repo/app/indexer/index.ts", name: "rerankResults", chunkType: "function" }) },
+    ];
+    const hybridLane: Candidate[] = [
+      { id: "noise", score: 1, metadata: meta({ filePath: "/repo/tests/fixtures/noise.ts", name: "entryPoint", chunkType: "function" }) },
+      { id: "def1", score: 0.7, metadata: meta({ filePath: "/repo/app/indexer/index.ts", name: "rankHybridResults", chunkType: "function" }) },
+      { id: "other", score: 0.69, metadata: meta({ filePath: "/repo/stacks/search/pipeline.ts", name: "pipeline", chunkType: "function" }) },
+    ];
+
+    const merged = mergeTieredResults(symbolLane, hybridLane, 5);
+    expect(merged.map((r) => r.id).slice(0, 2)).toEqual(["def1", "def2"]);
+    expect(merged.map((r) => r.id)).toContain("noise");
+  });
+
+  it("builds fallback lane from implementation code-term hints when exact symbol names are unavailable", () => {
+    const hybridLane: Candidate[] = [
+      { id: "target", score: 0.65, metadata: meta({ filePath: "/repo/app/indexer/index.ts", name: "buildSymbolDefinitionLane", chunkType: "function" }) },
+      { id: "noise", score: 0.9, metadata: meta({ filePath: "/repo/tests/fixtures/call-graph/same-file-refs.ts", name: "entryPoint", chunkType: "function" }) },
+    ];
+
+    const symbolLane: Candidate[] = [
+      { id: "target", score: 0.88, metadata: meta({ filePath: "/repo/app/indexer/index.ts", name: "buildSymbolDefinitionLane", chunkType: "function" }) },
+    ];
+
+    const merged = mergeTieredResults(symbolLane, hybridLane, 5);
+    expect(merged[0]?.id).toBe("target");
+  });
+
+  it("prefers exact identifier implementation chunks over noisy fixture chunks", () => {
+    const semantic: Candidate[] = [
+      { id: "fixture", score: 0.96, metadata: meta({ filePath: "/repo/tests/fixtures/noise.ts", name: "entryPoint", chunkType: "function" }) },
+      { id: "bench", score: 0.95, metadata: meta({ filePath: "/repo/benchmarks/run.ts", name: "runBenchmarks", chunkType: "function" }) },
+      { id: "target", score: 0.7, metadata: meta({ filePath: "/repo/app/indexer/system.ts", name: "createSystem", chunkType: "export" }) },
+    ];
+    const keyword: Candidate[] = [
+      { id: "fixture", score: 0.9, metadata: meta({ filePath: "/repo/tests/fixtures/noise.ts", name: "entryPoint", chunkType: "function" }) },
+      { id: "target", score: 0.65, metadata: meta({ filePath: "/repo/app/indexer/system.ts", name: "createSystem", chunkType: "export" }) },
+    ];
+
+    const ranked = rankHybridResults("where is createSystem implementation", semantic, keyword, {
+      fusionStrategy: "rrf",
+      rrfK: 60,
+      rerankTopN: 20,
+      limit: 5,
+      hybridWeight: 0.5,
+    });
+
+    expect(ranked[0]?.id).toBe("target");
+  });
+
+  it("deterministically prefers exact name chunk even when fixture has higher base score", () => {
+    const semantic: Candidate[] = [
+      { id: "fixture", score: 0.98, metadata: meta({ filePath: "/repo/tests/fixtures/same-file-refs.ts", name: "entryPoint", chunkType: "function" }) },
+      { id: "target", score: 0.61, metadata: meta({ filePath: "/repo/packages/react/src/styled-system/system.ts", name: "createSystem", chunkType: "function" }) },
+    ];
+    const keyword: Candidate[] = [
+      { id: "fixture", score: 0.97, metadata: meta({ filePath: "/repo/tests/fixtures/same-file-refs.ts", name: "entryPoint", chunkType: "function" }) },
+      { id: "target", score: 0.62, metadata: meta({ filePath: "/repo/packages/react/src/styled-system/system.ts", name: "createSystem", chunkType: "function" }) },
+    ];
+
+    const ranked = rankHybridResults("where is createSystem implementation", semantic, keyword, {
+      fusionStrategy: "rrf",
+      rrfK: 60,
+      rerankTopN: 20,
+      limit: 5,
+      hybridWeight: 0.5,
+    });
+
+    expect(ranked[0]?.id).toBe("target");
+  });
+
+  it("classifies implementation intent correctly even with benchmark/test terms present", () => {
+    const candidates: Candidate[] = [
+      { id: "impl", score: 0.88, metadata: meta({ filePath: "/repo/src/indexer/system.ts", name: "createSystem", chunkType: "function" }) },
+      { id: "bench", score: 0.92, metadata: meta({ filePath: "/repo/benchmarks/run.ts", name: "runBenchmarks", chunkType: "function" }) },
+      { id: "tests", score: 0.9, metadata: meta({ filePath: "/repo/tests/system.test.ts", name: "createSystem test", chunkType: "function" }) },
+    ];
+
+    const queries = [
+      "where is createSystem implementation",
+      "where is rankHybridResults implementation benchmark test",
+      "where is createSystem benchmark",
+    ];
+
+    for (const query of queries) {
+      const reranked = rerankResults(query, candidates, 10);
+      expect(reranked[0]?.id).toBe("impl");
+    }
+  });
+
+  it("extracts file path hint from path-constrained implementation query", () => {
+    const query = "where is createSystem implementation in packages/react/src/styled-system/system.ts";
+    expect(extractFilePathHint(query)).toBe("packages/react/src/styled-system/system.ts");
+  });
+
+  it("returns null for queries without file path hint", () => {
+    const query = "where is createSystem implementation";
+    expect(extractFilePathHint(query)).toBeNull();
+  });
+
+  it("strips file path suffix from embedding query text", () => {
+    const query = "where is createSystem implementation in packages/react/src/styled-system/system.ts";
+    expect(stripFilePathHint(query)).toBe("where is createSystem implementation");
   });
 });
