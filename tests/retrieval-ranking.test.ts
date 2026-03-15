@@ -5,11 +5,11 @@ import {
   extractFilePathHint,
   fuseResultsRrf,
   fuseResultsWeighted,
+  rankSemanticOnlyResults,
   mergeTieredResults,
   rankHybridResults,
   stripFilePathHint,
   rerankResults,
-  rankSemanticOnlyResults,
 } from "../src/indexer/index.js";
 
 type Candidate = { id: string; score: number; metadata: ChunkMetadata };
@@ -287,23 +287,36 @@ describe("retrieval ranking", () => {
     expect(ranked[0]?.id).toBe("target");
   });
 
-  it("classifies implementation intent correctly even with benchmark/test terms present", () => {
+  it("classifies implementation intent correctly with explicit implementation signal, and avoids over-routing doc/test phrasing", () => {
     const candidates: Candidate[] = [
       { id: "impl", score: 0.88, metadata: meta({ filePath: "/repo/src/indexer/system.ts", name: "createSystem", chunkType: "function" }) },
       { id: "bench", score: 0.92, metadata: meta({ filePath: "/repo/benchmarks/run.ts", name: "runBenchmarks", chunkType: "function" }) },
       { id: "tests", score: 0.9, metadata: meta({ filePath: "/repo/tests/system.test.ts", name: "createSystem test", chunkType: "function" }) },
     ];
 
-    const queries = [
-      "where is createSystem implementation",
-      "where is rankHybridResults implementation benchmark test",
+    const implementationQuery = "where is createSystem implementation";
+    const implementationReranked = rerankResults(implementationQuery, candidates, 10);
+    expect(implementationReranked[0]?.id).toBe("impl");
+
+    const docTestWeightedQueries = [
+      "where is createSystem implementation benchmark test",
       "where is createSystem benchmark",
     ];
-
-    for (const query of queries) {
+    for (const query of docTestWeightedQueries) {
       const reranked = rerankResults(query, candidates, 10);
-      expect(reranked[0]?.id).toBe("impl");
+      expect(reranked[0]?.id).not.toBe("impl");
     }
+  });
+
+  it("does not over-route doc phrasing with 'where is ... documentation' to source intent", () => {
+    const candidates: Candidate[] = [
+      { id: "impl", score: 0.91, metadata: meta({ filePath: "/repo/src/indexer/index.ts", name: "rankHybridResults", chunkType: "function" }) },
+      { id: "docs", score: 0.9, metadata: meta({ filePath: "/repo/README.md", name: "retrieval documentation", chunkType: "other" }) },
+      { id: "tests", score: 0.89, metadata: meta({ filePath: "/repo/tests/retrieval.test.ts", name: "rankHybridResults test", chunkType: "function" }) },
+    ];
+
+    const reranked = rerankResults("where is rankHybridResults documentation", candidates, 10);
+    expect(reranked[0]?.id).toBe("docs");
   });
 
   it("extracts file path hint from path-constrained implementation query", () => {

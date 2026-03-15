@@ -388,8 +388,33 @@ function classifyQueryIntent(tokens: string[]): "source" | "doc_test" {
 
 function classifyQueryIntentRaw(query: string): "source" | "doc_test" {
   const lowerQuery = query.toLowerCase();
-  const hasImplementationSignal = /\bimplementation\b|\bimplements\b|\bimplement\b|\bfunction\b|\bpipeline\b|\bwhere(?:\s+is)?\b/.test(lowerQuery);
-  if (hasImplementationSignal) {
+  const docTestRawHits = Array.from(DOC_TEST_INTENT_HINTS).filter((hint) =>
+    new RegExp(`\\b${hint}\\b`).test(lowerQuery)
+  ).length;
+  const sourceRawHits = [
+    "implement",
+    "implementation",
+    "implements",
+    "function",
+    "method",
+    "class",
+    "logic",
+    "algorithm",
+    "pipeline",
+    "indexer",
+  ].filter((hint) => new RegExp(`\\b${hint}\\b`).test(lowerQuery)).length;
+
+  if (docTestRawHits > sourceRawHits) {
+    return "doc_test";
+  }
+
+  if (sourceRawHits > docTestRawHits) {
+    return "source";
+  }
+
+  const hasWhereIsPattern = /\bwhere\s+is\b/.test(lowerQuery);
+  const hasIdentifierHints = extractIdentifierHints(query).length > 0;
+  if (hasWhereIsPattern && hasIdentifierHints && docTestRawHits === 0) {
     return "source";
   }
 

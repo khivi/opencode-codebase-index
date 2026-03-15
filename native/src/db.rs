@@ -13,7 +13,7 @@ pub enum DbError {
 pub type DbResult<T> = Result<T, DbError>;
 
 /// Schema version for migrations
-const SCHEMA_VERSION: i32 = 3;
+const SCHEMA_VERSION: i32 = 4;
 
 /// Maximum number of SQL bind parameters per query.
 /// SQLite defaults to 999 (SQLITE_MAX_VARIABLE_NUMBER). We use 900 to stay safely under.
@@ -94,6 +94,8 @@ fn migrate_schema(conn: &Connection, from_version: i32) -> DbResult<()> {
             -- Indexes for fast lookups
             CREATE INDEX IF NOT EXISTS idx_chunks_content_hash ON chunks(content_hash);
             CREATE INDEX IF NOT EXISTS idx_chunks_file_path ON chunks(file_path);
+            CREATE INDEX IF NOT EXISTS idx_chunks_name ON chunks(name);
+            CREATE INDEX IF NOT EXISTS idx_chunks_name_lower ON chunks(lower(name));
             CREATE INDEX IF NOT EXISTS idx_branch_chunks_branch ON branch_chunks(branch);
             CREATE INDEX IF NOT EXISTS idx_branch_chunks_chunk_id ON branch_chunks(chunk_id);
             "#,
@@ -193,6 +195,20 @@ fn migrate_schema(conn: &Connection, from_version: i32) -> DbResult<()> {
             COMMIT;
 
             PRAGMA foreign_keys = ON;
+            "#,
+        )?;
+
+        conn.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_version', ?)",
+            params![SCHEMA_VERSION.to_string()],
+        )?;
+    }
+
+    if (3..4).contains(&from_version) {
+        conn.execute_batch(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_chunks_name ON chunks(name);
+            CREATE INDEX IF NOT EXISTS idx_chunks_name_lower ON chunks(lower(name));
             "#,
         )?;
 
@@ -1762,7 +1778,7 @@ mod tests {
     }
 
     #[test]
-    fn test_migration_v3_adds_cascade_on_call_edges() {
+    fn test_migration_v4_adds_cascade_on_call_edges_and_chunk_name_indexes() {
         let temp_dir = tempfile::tempdir().unwrap();
         let db_path = temp_dir.path().join("migration-v2.db");
 
@@ -1814,12 +1830,24 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(schema_version, "3");
+        assert_eq!(schema_version, "4");
 
         let on_delete: String = conn
             .query_row("PRAGMA foreign_key_list(call_edges)", [], |row| row.get(6))
             .unwrap();
         assert_eq!(on_delete.to_uppercase(), "CASCADE");
+
+        let mut stmt = conn.prepare("PRAGMA index_list('chunks')").unwrap();
+        let index_names: Vec<String> = stmt
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect();
+
+        assert!(index_names.iter().any(|name| name == "idx_chunks_name"));
+        assert!(index_names
+            .iter()
+            .any(|name| name == "idx_chunks_name_lower"));
     }
 
     #[test]

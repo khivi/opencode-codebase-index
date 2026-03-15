@@ -1,11 +1,14 @@
-import { mkdirSync, readFileSync, writeFileSync } from "fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import * as os from "os";
 import * as path from "path";
 import { performance } from "perf_hooks";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { ChunkMetadata } from "../src/native/index.js";
+import { parseConfig } from "../src/config/schema.js";
 import { rankHybridResults } from "../src/indexer/index.js";
+import { Indexer } from "../src/indexer/index.js";
 
 type Candidate = { id: string; score: number; metadata: ChunkMetadata };
 
@@ -269,5 +272,86 @@ describe("retrieval benchmark", () => {
 
     expect(candidate.medianMs).toBeLessThanOrEqual(medianBudget);
     expect(candidate.p95Ms).toBeLessThanOrEqual(p95Budget);
+  });
+
+  it("keeps DB-backed search lane latency bounded for implementation-intent query", async () => {
+    const tempDir = mkdtempSync(path.join(os.tmpdir(), "search-lane-bench-"));
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    fetchSpy.mockImplementation(async (_url, init) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { input?: string[] };
+      const texts = Array.isArray(body.input) ? body.input : [];
+      const data = texts.map((text) => {
+        let seed = 0;
+        for (const ch of text) {
+          seed = (seed * 31 + ch.charCodeAt(0)) % 1000;
+        }
+        return {
+          embedding: Array.from({ length: 8 }, (_, idx) => ((seed + idx * 17) % 997) / 997),
+        };
+      });
+
+      return new Response(
+        JSON.stringify({
+          data,
+          usage: { total_tokens: Math.max(1, texts.length * 8) },
+        }),
+        { status: 200 }
+      );
+    });
+
+    try {
+      mkdirSync(path.join(tempDir, "src", "indexer"), { recursive: true });
+      mkdirSync(path.join(tempDir, "tests", "fixtures"), { recursive: true });
+      writeFileSync(
+        path.join(tempDir, "src", "indexer", "index.ts"),
+        "export function rankHybridResults(q: string) { return q.length; }\n",
+        "utf-8"
+      );
+      writeFileSync(
+        path.join(tempDir, "tests", "fixtures", "noise.ts"),
+        "export const fixture = 'where is rankHybridResults implementation benchmark';\n",
+        "utf-8"
+      );
+
+      const config = parseConfig({
+        embeddingProvider: "custom",
+        customProvider: {
+          baseUrl: "http://localhost:11434/v1",
+          model: "mock-embedding-model",
+          dimensions: 8,
+        },
+        indexing: {
+          watchFiles: false,
+        },
+        search: {
+          maxResults: 10,
+          minScore: 0,
+          fusionStrategy: "rrf",
+          rrfK: 60,
+          rerankTopN: 20,
+        },
+      });
+
+      const indexer = new Indexer(tempDir, config);
+      await indexer.index();
+
+      const samples: number[] = [];
+      for (let i = 0; i < 12; i += 1) {
+        const start = performance.now();
+        const results = await indexer.search("where is rankHybridResults implementation", 5, {
+          metadataOnly: true,
+          filterByBranch: false,
+        });
+        const elapsed = performance.now() - start;
+        samples.push(elapsed);
+        expect(results[0]?.filePath).toContain("/src/indexer/index.ts");
+      }
+
+      const laneP95 = percentile(samples, 95);
+      expect(laneP95).toBeLessThanOrEqual(50);
+    } finally {
+      fetchSpy.mockRestore();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 });

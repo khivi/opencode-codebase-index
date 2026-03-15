@@ -62,6 +62,12 @@ export function rerankResults(query: string) { return rankHybridResults(query); 
 `,
       "utf-8"
     );
+
+    fs.writeFileSync(
+      path.join(tempDir, "README.md"),
+      "# Retrieval Documentation\n\nThis doc explains rankHybridResults usage.",
+      "utf-8"
+    );
   });
 
   afterEach(() => {
@@ -102,5 +108,36 @@ export function rerankResults(query: string) { return rankHybridResults(query); 
     expect(topPaths[0]).toContain("/app/indexer/index.ts");
     expect(topPaths).not.toContain("/tests/fixtures/call-graph/same-file-refs.ts");
     expect(topPaths).not.toContain("/benchmarks/run.ts");
+  });
+
+  it("prefers documentation paths for doc-intent phrasing with 'where is'", async () => {
+    const config = parseConfig({
+      embeddingProvider: "custom",
+      customProvider: {
+        baseUrl: "http://localhost:11434/v1",
+        model: "mock-embedding-model",
+        dimensions: 8,
+      },
+      indexing: {
+        watchFiles: false,
+      },
+      search: {
+        maxResults: 10,
+        minScore: 0,
+        fusionStrategy: "rrf",
+        rrfK: 60,
+        rerankTopN: 20,
+      },
+    });
+
+    const indexer = new Indexer(tempDir, config);
+    await indexer.index();
+
+    const results = await indexer.search("where is rankHybridResults documentation", 5, {
+      metadataOnly: true,
+      filterByBranch: false,
+    });
+
+    expect(results[0]?.filePath).toContain("/README.md");
   });
 });
