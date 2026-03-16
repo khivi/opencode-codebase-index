@@ -1790,6 +1790,28 @@ mod tests {
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );
+                CREATE TABLE embeddings (
+                    content_hash TEXT PRIMARY KEY,
+                    embedding BLOB NOT NULL,
+                    chunk_text TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    created_at INTEGER NOT NULL
+                );
+                CREATE TABLE chunks (
+                    chunk_id TEXT PRIMARY KEY,
+                    content_hash TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    start_line INTEGER NOT NULL,
+                    end_line INTEGER NOT NULL,
+                    node_type TEXT,
+                    name TEXT,
+                    language TEXT NOT NULL
+                );
+                CREATE TABLE branch_chunks (
+                    branch TEXT NOT NULL,
+                    chunk_id TEXT NOT NULL,
+                    PRIMARY KEY (branch, chunk_id)
+                );
                 CREATE TABLE symbols (
                     id TEXT PRIMARY KEY,
                     file_path TEXT NOT NULL,
