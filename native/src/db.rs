@@ -162,7 +162,7 @@ fn migrate_schema(conn: &Connection, from_version: i32) -> DbResult<()> {
             params![SCHEMA_VERSION.to_string()],
         )?;
     }
-    if (2..3).contains(&from_version) {
+    if from_version < 3 {
         conn.execute_batch(
             r#"
             PRAGMA foreign_keys = OFF;
@@ -204,7 +204,7 @@ fn migrate_schema(conn: &Connection, from_version: i32) -> DbResult<()> {
         )?;
     }
 
-    if (3..4).contains(&from_version) {
+    if from_version < 4 {
         conn.execute_batch(
             r#"
             CREATE INDEX IF NOT EXISTS idx_chunks_name ON chunks(name);
@@ -1344,7 +1344,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "3");
+        assert_eq!(version, "4");
     }
 
     #[test]
