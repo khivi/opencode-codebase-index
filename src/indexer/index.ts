@@ -153,6 +153,22 @@ interface FailedBatch {
   lastAttempt: string;
 }
 
+type RankedCandidate = { id: string; score: number; metadata: ChunkMetadata };
+
+interface HybridRankOptions {
+  fusionStrategy: "weighted" | "rrf";
+  rrfK: number;
+  rerankTopN: number;
+  limit: number;
+  hybridWeight: number;
+}
+
+interface SemanticRankOptions {
+  rerankTopN: number;
+  limit: number;
+  prioritizeSourcePaths?: boolean;
+}
+
 interface IndexMetadata {
   indexVersion: string;
   embeddingProvider: string;
@@ -175,6 +191,1093 @@ interface IndexCompatibility {
 }
 
 const INDEX_METADATA_VERSION = "1";
+const RANKING_TOKEN_CACHE_LIMIT = 4096;
+
+const rankingQueryTokenCache = new Map<string, Set<string>>();
+const rankingNameTokenCache = new Map<string, Set<string>>();
+const rankingPathTokenCache = new Map<string, Set<string>>();
+const rankingTextTokenCache = new Map<string, Set<string>>();
+
+const STOPWORDS = new Set([
+  "the", "and", "for", "with", "from", "that", "this", "into", "using", "where",
+  "what", "when", "why", "how", "are", "was", "were", "be", "been", "being",
+  "find", "show", "get", "run", "use", "code", "function", "implementation",
+  "retrieve", "results", "result", "search", "pipeline", "top", "in", "on", "of",
+  "to", "by", "as", "or", "an", "a",
+]);
+
+const TEST_PATH_SEGMENTS = [
+  "tests/",
+  "__tests__/",
+  "/test/",
+  "fixtures/",
+  "benchmark",
+  "README",
+  "ARCHITECTURE",
+  "docs/",
+];
+
+const IMPLEMENTATION_EXCLUDE_PATH_SEGMENTS = [
+  "tests/",
+  "__tests__/",
+  "/test/",
+  "fixtures/",
+  "benchmark",
+  "readme",
+  "architecture",
+  "docs/",
+  "examples/",
+  "example/",
+  ".github/",
+  "/scripts/",
+  "/migrations/",
+  "/generated/",
+];
+
+const SOURCE_INTENT_HINTS = new Set([
+  "implement",
+  "implementation",
+  "function",
+  "method",
+  "class",
+  "logic",
+  "algorithm",
+  "pipeline",
+  "indexer",
+  "where",
+]);
+
+const DOC_TEST_INTENT_HINTS = new Set([
+  "test",
+  "tests",
+  "fixture",
+  "fixtures",
+  "benchmark",
+  "readme",
+  "docs",
+  "documentation",
+]);
+
+const DOC_INTENT_HINTS = new Set([
+  "readme",
+  "docs",
+  "documentation",
+  "guide",
+  "usage",
+]);
+
+function setBoundedCache(
+  cache: Map<string, Set<string>>,
+  key: string,
+  value: Set<string>
+): void {
+  if (cache.size >= RANKING_TOKEN_CACHE_LIMIT) {
+    const oldest = cache.keys().next().value;
+    if (oldest !== undefined) {
+      cache.delete(oldest);
+    }
+  }
+  cache.set(key, value);
+}
+
+function tokenizeTextForRanking(text: string): Set<string> {
+  if (!text) {
+    return new Set<string>();
+  }
+
+  const lowered = text.toLowerCase();
+  const cache = rankingQueryTokenCache.get(lowered) ?? rankingTextTokenCache.get(lowered);
+  if (cache) {
+    return cache;
+  }
+
+  const tokens = new Set(
+    lowered
+      .replace(/[^\w\s]/g, " ")
+      .split(/\s+/)
+      .filter((token) => token.length > 1 && !STOPWORDS.has(token))
+  );
+
+  setBoundedCache(rankingQueryTokenCache, lowered, tokens);
+  setBoundedCache(rankingTextTokenCache, lowered, tokens);
+  return tokens;
+}
+
+function splitPathTokens(filePath: string): Set<string> {
+  const lowered = filePath.toLowerCase();
+  const cache = rankingPathTokenCache.get(lowered);
+  if (cache) {
+    return cache;
+  }
+
+  const normalized = lowered
+    .replace(/[^a-z0-9/._-]/g, " ")
+    .split(/[/._-]+/)
+    .filter((token) => token.length > 1);
+  const tokens = new Set(normalized);
+  setBoundedCache(rankingPathTokenCache, lowered, tokens);
+  return tokens;
+}
+
+function splitNameTokens(name: string): Set<string> {
+  if (!name) {
+    return new Set<string>();
+  }
+
+  const lowered = name.toLowerCase();
+  const cache = rankingNameTokenCache.get(lowered);
+  if (cache) {
+    return cache;
+  }
+
+  const tokens = new Set(
+    lowered
+      .replace(/[^\w\s]/g, " ")
+      .split(/\s+/)
+      .filter((token) => token.length > 1)
+  );
+  setBoundedCache(rankingNameTokenCache, lowered, tokens);
+  return tokens;
+}
+
+function chunkTypeBoost(chunkType: string): number {
+  switch (chunkType) {
+    case "function":
+    case "function_declaration":
+    case "method":
+    case "method_definition":
+    case "class":
+    case "class_declaration":
+      return 0.2;
+    case "interface":
+    case "type":
+    case "enum":
+    case "struct":
+    case "impl":
+    case "trait":
+    case "module":
+      return 0.1;
+    default:
+      return 0;
+  }
+}
+
+function isTestOrDocPath(filePath: string): boolean {
+  return TEST_PATH_SEGMENTS.some((segment) => filePath.includes(segment));
+}
+
+function isLikelyImplementationPath(filePath: string): boolean {
+  const lowered = filePath.toLowerCase();
+  if (IMPLEMENTATION_EXCLUDE_PATH_SEGMENTS.some((segment) => lowered.includes(segment))) {
+    return false;
+  }
+
+  const ext = lowered.split(".").pop() ?? "";
+  if (["md", "mdx", "txt", "rst", "adoc", "snap", "json", "yaml", "yml", "lock"].includes(ext)) {
+    return false;
+  }
+
+  return true;
+}
+
+function classifyQueryIntent(tokens: string[]): "source" | "doc_test" {
+  const sourceIntentHits = tokens.filter((t) => SOURCE_INTENT_HINTS.has(t)).length;
+  const docTestIntentHits = tokens.filter((t) => DOC_TEST_INTENT_HINTS.has(t)).length;
+  return sourceIntentHits >= docTestIntentHits ? "source" : "doc_test";
+}
+
+function classifyQueryIntentRaw(query: string): "source" | "doc_test" {
+  const lowerQuery = query.toLowerCase();
+  const docTestRawHits = Array.from(DOC_TEST_INTENT_HINTS).filter((hint) =>
+    new RegExp(`\\b${hint}\\b`).test(lowerQuery)
+  ).length;
+  const sourceRawHits = [
+    "implement",
+    "implementation",
+    "implements",
+    "function",
+    "method",
+    "class",
+    "logic",
+    "algorithm",
+    "pipeline",
+    "indexer",
+  ].filter((hint) => new RegExp(`\\b${hint}\\b`).test(lowerQuery)).length;
+
+  if (docTestRawHits > sourceRawHits) {
+    return "doc_test";
+  }
+
+  if (sourceRawHits > docTestRawHits) {
+    return "source";
+  }
+
+  const hasWhereIsPattern = /\bwhere\s+is\b/.test(lowerQuery);
+  const hasIdentifierHints = extractIdentifierHints(query).length > 0;
+  if (hasWhereIsPattern && hasIdentifierHints && docTestRawHits === 0) {
+    return "source";
+  }
+
+  const queryTokens = Array.from(tokenizeTextForRanking(query));
+  return classifyQueryIntent(queryTokens);
+}
+
+function classifyDocIntent(tokens: string[]): "docs" | "test" | "mixed" | "none" {
+  const docHits = tokens.filter((t) => DOC_INTENT_HINTS.has(t)).length;
+  const testHits = tokens.filter((t) => ["test", "tests", "fixture", "fixtures", "benchmark"].includes(t)).length;
+
+  if (docHits > 0 && testHits === 0) return "docs";
+  if (testHits > 0 && docHits === 0) return "test";
+  if (testHits > 0 || docHits > 0) return "mixed";
+  return "none";
+}
+
+function isImplementationChunkType(chunkType: string): boolean {
+  return [
+    "export_statement",
+    "function",
+    "function_declaration",
+    "method",
+    "method_definition",
+    "class",
+    "class_declaration",
+    "interface",
+    "type",
+    "enum",
+    "module",
+  ].includes(chunkType);
+}
+
+function extractIdentifierHints(query: string): string[] {
+  const identifiers = query.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? [];
+  return identifiers
+    .filter((id) => id.length >= 3)
+    .filter((id) => {
+      const lower = id.toLowerCase();
+      if (STOPWORDS.has(lower)) return false;
+      return /[A-Z]/.test(id) || id.includes("_") || id.endsWith("Results") || id.endsWith("Result");
+    })
+    .map((id) => id.toLowerCase());
+}
+
+function extractCodeTermHints(query: string): string[] {
+  const terms = query.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? [];
+  return terms
+    .map((term) => term.toLowerCase())
+    .filter((term) => term.length >= 3)
+    .filter((term) => !STOPWORDS.has(term));
+}
+
+function normalizeIdentifierVariants(identifier: string): string[] {
+  const lower = identifier.toLowerCase();
+  const compact = lower.replace(/[^a-z0-9]/g, "");
+  const snake = compact.replace(/([a-z])([A-Z])/g, "$1_$2").toLowerCase();
+  const kebab = snake.replace(/_/g, "-");
+  const variants = [lower, compact, snake, kebab].filter((value) => value.length > 0);
+  return Array.from(new Set(variants));
+}
+
+function scoreIdentifierMatch(name: string | undefined, filePath: string, hints: string[]): number {
+  const nameLower = (name ?? "").toLowerCase();
+  const pathLower = filePath.toLowerCase();
+
+  let best = 0;
+  for (const hint of hints) {
+    const variants = normalizeIdentifierVariants(hint);
+    for (const variant of variants) {
+      if (nameLower === variant) {
+        best = Math.max(best, 1);
+      } else if (nameLower.includes(variant)) {
+        best = Math.max(best, 0.8);
+      } else if (pathLower.includes(variant)) {
+        best = Math.max(best, 0.6);
+      }
+    }
+  }
+
+  return best;
+}
+
+function extractPrimaryIdentifierQueryHint(query: string): string | null {
+  const identifiers = extractIdentifierHints(query);
+  if (identifiers.length > 0) {
+    return identifiers[0] ?? null;
+  }
+
+  const codeTerms = extractCodeTermHints(query);
+  const best = codeTerms.find((term) => term.length >= 6);
+  return best ?? null;
+}
+
+const FILE_PATH_HINT_EXTENSIONS = [
+  "ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts",
+  "py", "rs", "go", "java", "kt", "kts", "swift", "rb", "php",
+  "c", "h", "cc", "cpp", "cxx", "hpp", "cs", "scala", "lua",
+  "sh", "bash", "zsh", "json", "yaml", "yml", "toml",
+];
+
+const FILE_PATH_HINT_SUFFIX_REGEX = new RegExp(
+  "\\s+\\bin\\s+[\"'`]?((?:\\.\\/)?(?:[A-Za-z0-9._-]+\\/)+[A-Za-z0-9._-]+\\.(?:" +
+  FILE_PATH_HINT_EXTENSIONS.join("|") +
+  "))[\"'`]?[\\])}>.,;!?]*\\s*$",
+  "i"
+);
+
+function normalizeFilePathForHintMatch(filePath: string): string {
+  return filePath.replace(/\\/g, "/").toLowerCase().replace(/^\.\//, "");
+}
+
+function pathMatchesHint(filePath: string, hint: string): boolean {
+  const normalizedPath = normalizeFilePathForHintMatch(filePath);
+  const normalizedHint = normalizeFilePathForHintMatch(hint);
+
+  return normalizedPath.endsWith(normalizedHint) ||
+    normalizedPath.includes(`/${normalizedHint}`) ||
+    normalizedPath.includes(normalizedHint);
+}
+
+export function extractFilePathHint(query: string): string | null {
+  const match = query.match(FILE_PATH_HINT_SUFFIX_REGEX);
+  const rawPath = match?.[1];
+  if (!rawPath) {
+    return null;
+  }
+
+  return rawPath.replace(/^\.\//, "");
+}
+
+export function stripFilePathHint(query: string): string {
+  const stripped = query.replace(FILE_PATH_HINT_SUFFIX_REGEX, "").trim();
+  return stripped.length > 0 ? stripped : query;
+}
+
+function buildDeterministicIdentifierPass(
+  query: string,
+  candidates: RankedCandidate[],
+  limit: number
+): RankedCandidate[] {
+  if (classifyQueryIntentRaw(query) !== "source") {
+    return [];
+  }
+
+  const primary = extractPrimaryIdentifierQueryHint(query);
+  if (!primary) {
+    return [];
+  }
+  const filePathHint = extractFilePathHint(query);
+  const primaryVariants = normalizeIdentifierVariants(primary);
+
+  const hints = [primary, ...extractIdentifierHints(query), ...extractCodeTermHints(query)]
+    .map((value) => value.toLowerCase())
+    .filter((value, idx, arr) => value.length >= 3 && arr.indexOf(value) === idx)
+    .slice(0, 8);
+
+  const deterministic = candidates
+    .filter((candidate) =>
+      isLikelyImplementationPath(candidate.metadata.filePath) &&
+      isImplementationChunkType(candidate.metadata.chunkType)
+    )
+    .map((candidate) => {
+      const nameLower = (candidate.metadata.name ?? "").toLowerCase();
+      const pathLower = candidate.metadata.filePath.toLowerCase();
+      let maxMatch = 0;
+      const nameMatchesPrimary = primaryVariants.some((variant) =>
+        nameLower === variant || nameLower.replace(/[^a-z0-9]/g, "") === variant.replace(/[^a-z0-9]/g, "")
+      );
+      const pathMatchesFileHint = filePathHint ? pathMatchesHint(candidate.metadata.filePath, filePathHint) : false;
+
+      for (const hint of hints) {
+        const variants = normalizeIdentifierVariants(hint);
+        for (const variant of variants) {
+          if (nameLower === variant) {
+            maxMatch = Math.max(maxMatch, 1);
+          } else if (nameLower.includes(variant)) {
+            maxMatch = Math.max(maxMatch, 0.85);
+          } else if (pathLower.includes(variant)) {
+            maxMatch = Math.max(maxMatch, 0.7);
+          }
+        }
+      }
+
+      if (pathMatchesFileHint && nameMatchesPrimary) {
+        maxMatch = Math.max(maxMatch, 1);
+      }
+
+      return {
+        candidate,
+        maxMatch,
+        pathMatchesFileHint,
+        nameMatchesPrimary,
+      };
+    })
+    .filter((entry) => entry.maxMatch >= 0.7)
+    .sort((a, b) => {
+      const aAnchored = a.pathMatchesFileHint && a.nameMatchesPrimary ? 1 : 0;
+      const bAnchored = b.pathMatchesFileHint && b.nameMatchesPrimary ? 1 : 0;
+      if (aAnchored !== bAnchored) return bAnchored - aAnchored;
+      if (b.maxMatch !== a.maxMatch) return b.maxMatch - a.maxMatch;
+      if (b.candidate.score !== a.candidate.score) return b.candidate.score - a.candidate.score;
+      return a.candidate.id.localeCompare(b.candidate.id);
+    })
+    .slice(0, Math.max(limit * 2, 12));
+
+  return deterministic.map((entry) => ({
+    id: entry.candidate.id,
+    score: entry.pathMatchesFileHint && entry.nameMatchesPrimary
+      ? 0.995
+      : Math.min(1, 0.9 + entry.maxMatch * 0.09),
+    metadata: entry.candidate.metadata,
+  }));
+}
+
+export function fuseResultsWeighted(
+  semanticResults: RankedCandidate[],
+  keywordResults: RankedCandidate[],
+  keywordWeight: number,
+  limit: number
+): RankedCandidate[] {
+  const semanticWeight = 1 - keywordWeight;
+  const fusedScores = new Map<string, { score: number; metadata: ChunkMetadata }>();
+
+  for (const r of semanticResults) {
+    fusedScores.set(r.id, {
+      score: r.score * semanticWeight,
+      metadata: r.metadata,
+    });
+  }
+
+  for (const r of keywordResults) {
+    const existing = fusedScores.get(r.id);
+    if (existing) {
+      existing.score += r.score * keywordWeight;
+    } else {
+      fusedScores.set(r.id, {
+        score: r.score * keywordWeight,
+        metadata: r.metadata,
+      });
+    }
+  }
+
+  const results = Array.from(fusedScores.entries()).map(([id, data]) => ({
+    id,
+    score: data.score,
+    metadata: data.metadata,
+  }));
+
+  results.sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
+  return results.slice(0, limit);
+}
+
+export function fuseResultsRrf(
+  semanticResults: RankedCandidate[],
+  keywordResults: RankedCandidate[],
+  rrfK: number,
+  limit: number
+): RankedCandidate[] {
+  const maxPossibleRaw = 2 / (rrfK + 1);
+  const rankByIdSemantic = new Map<string, number>();
+  const rankByIdKeyword = new Map<string, number>();
+  const metadataById = new Map<string, ChunkMetadata>();
+
+  semanticResults.forEach((result, index) => {
+    rankByIdSemantic.set(result.id, index + 1);
+    metadataById.set(result.id, result.metadata);
+  });
+
+  keywordResults.forEach((result, index) => {
+    rankByIdKeyword.set(result.id, index + 1);
+    if (!metadataById.has(result.id)) {
+      metadataById.set(result.id, result.metadata);
+    }
+  });
+
+  const allIds = new Set<string>([...rankByIdSemantic.keys(), ...rankByIdKeyword.keys()]);
+  const fused: RankedCandidate[] = [];
+
+  for (const id of allIds) {
+    const semanticRank = rankByIdSemantic.get(id);
+    const keywordRank = rankByIdKeyword.get(id);
+
+    const semanticScore = semanticRank ? 1 / (rrfK + semanticRank) : 0;
+    const keywordScore = keywordRank ? 1 / (rrfK + keywordRank) : 0;
+
+    const metadata = metadataById.get(id);
+    if (!metadata) continue;
+
+    fused.push({
+      id,
+      score: maxPossibleRaw > 0 ? (semanticScore + keywordScore) / maxPossibleRaw : 0,
+      metadata,
+    });
+  }
+
+  fused.sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
+  return fused.slice(0, limit);
+}
+
+export function rerankResults(
+  query: string,
+  candidates: RankedCandidate[],
+  rerankTopN: number,
+  options?: { prioritizeSourcePaths?: boolean }
+): RankedCandidate[] {
+  if (rerankTopN <= 0 || candidates.length <= 1) {
+    return candidates;
+  }
+
+  const topN = Math.min(rerankTopN, candidates.length);
+  const queryTokens = tokenizeTextForRanking(query);
+  if (queryTokens.size === 0) {
+    return candidates;
+  }
+
+  const queryTokenList = Array.from(queryTokens);
+  const intent = classifyQueryIntentRaw(query);
+  const docIntent = classifyDocIntent(queryTokenList);
+  const preferSourcePaths = options?.prioritizeSourcePaths ?? intent === "source";
+  const identifierHints = extractIdentifierHints(query);
+
+  const head = candidates.slice(0, topN).map((candidate, idx) => {
+    const pathTokens = splitPathTokens(candidate.metadata.filePath);
+    const nameTokens = splitNameTokens(candidate.metadata.name ?? "");
+    const chunkTypeTokens = tokenizeTextForRanking(candidate.metadata.chunkType);
+    let exactOrPrefixNameHits = 0;
+    let pathOverlap = 0;
+    let chunkTypeHits = 0;
+
+    for (const token of queryTokenList) {
+      if (nameTokens.has(token)) {
+        exactOrPrefixNameHits += 1;
+      } else {
+        for (const nameToken of nameTokens) {
+          if (nameToken.startsWith(token) || token.startsWith(nameToken)) {
+            exactOrPrefixNameHits += 1;
+            break;
+          }
+        }
+      }
+
+      if (pathTokens.has(token)) {
+        pathOverlap += 1;
+      }
+
+      if (chunkTypeTokens.has(token)) {
+        chunkTypeHits += 1;
+      }
+    }
+
+    const likelyTestOrDoc = isTestOrDocPath(candidate.metadata.filePath);
+    const lowerPath = candidate.metadata.filePath.toLowerCase();
+    const lowerName = (candidate.metadata.name ?? "").toLowerCase();
+    const hasIdentifierMatch = identifierHints.some((id) => lowerPath.includes(id) || lowerName.includes(id));
+
+    const implementationPathBoost = preferSourcePaths && isLikelyImplementationPath(candidate.metadata.filePath) ? 0.08 : 0;
+    const isReadmePath = candidate.metadata.filePath.toLowerCase().includes("readme");
+    const testDocPenalty = preferSourcePaths && likelyTestOrDoc ? 0.12 : 0;
+    const readmeDocBoost = !preferSourcePaths && isReadmePath ? 0.08 : 0;
+    const identifierBoost = hasIdentifierMatch ? 0.12 : 0;
+    const tokenCoverage = queryTokenList.length > 0
+      ? (exactOrPrefixNameHits + pathOverlap + chunkTypeHits) / queryTokenList.length
+      : 0;
+    const coverageBoost = Math.min(0.12, tokenCoverage * 0.06);
+
+    const deterministicBoost =
+      exactOrPrefixNameHits * 0.08 +
+      pathOverlap * 0.03 +
+      chunkTypeHits * 0.02 +
+      coverageBoost +
+      identifierBoost +
+      implementationPathBoost -
+      testDocPenalty +
+      readmeDocBoost +
+      chunkTypeBoost(candidate.metadata.chunkType);
+
+    return {
+      candidate,
+      boostedScore: candidate.score + deterministicBoost,
+      originalIndex: idx,
+      hasIdentifierMatch,
+      implementationChunk: isImplementationChunkType(candidate.metadata.chunkType),
+      isLikelyImplementationPath: isLikelyImplementationPath(candidate.metadata.filePath),
+      isTestOrDocPath: likelyTestOrDoc,
+      isReadmePath,
+    };
+  });
+
+  head.sort((a, b) => {
+    if (b.boostedScore !== a.boostedScore) return b.boostedScore - a.boostedScore;
+    if (b.candidate.score !== a.candidate.score) return b.candidate.score - a.candidate.score;
+    if (a.originalIndex !== b.originalIndex) return a.originalIndex - b.originalIndex;
+    return a.candidate.id.localeCompare(b.candidate.id);
+  });
+
+  if (preferSourcePaths) {
+    head.sort((a, b) => {
+      const aId = a.hasIdentifierMatch ? 1 : 0;
+      const bId = b.hasIdentifierMatch ? 1 : 0;
+      if (aId !== bId) return bId - aId;
+
+      const aImpl = a.implementationChunk ? 1 : 0;
+      const bImpl = b.implementationChunk ? 1 : 0;
+      if (aImpl !== bImpl) return bImpl - aImpl;
+
+      const aImplementationPath = a.isLikelyImplementationPath ? 1 : 0;
+      const bImplementationPath = b.isLikelyImplementationPath ? 1 : 0;
+      if (aImplementationPath !== bImplementationPath) return bImplementationPath - aImplementationPath;
+
+      const aTestDoc = a.isTestOrDocPath ? 1 : 0;
+      const bTestDoc = b.isTestOrDocPath ? 1 : 0;
+      if (aTestDoc !== bTestDoc) return aTestDoc - bTestDoc;
+
+      return 0;
+    });
+  } else if (docIntent === "docs") {
+    head.sort((a, b) => {
+      const aReadme = a.isReadmePath ? 1 : 0;
+      const bReadme = b.isReadmePath ? 1 : 0;
+      if (aReadme !== bReadme) return bReadme - aReadme;
+      return 0;
+    });
+  }
+
+  const tail = candidates.slice(topN);
+  return [...head.map((entry) => entry.candidate), ...tail];
+}
+
+export function rankHybridResults(
+  query: string,
+  semanticResults: RankedCandidate[],
+  keywordResults: RankedCandidate[],
+  options: HybridRankOptions
+): RankedCandidate[] {
+  const overfetchLimit = Math.max(options.limit * 4, options.limit);
+  const fused = options.fusionStrategy === "rrf"
+    ? fuseResultsRrf(semanticResults, keywordResults, options.rrfK, overfetchLimit)
+    : fuseResultsWeighted(semanticResults, keywordResults, options.hybridWeight, overfetchLimit);
+
+  const rerankPoolLimit = Math.max(overfetchLimit, options.rerankTopN * 3, options.limit * 6);
+  const rerankPool = fused.slice(0, rerankPoolLimit);
+  const intent = classifyQueryIntentRaw(query);
+  return rerankResults(query, rerankPool, options.rerankTopN, {
+    prioritizeSourcePaths: intent === "source",
+  });
+}
+
+export function rankSemanticOnlyResults(
+  query: string,
+  semanticResults: RankedCandidate[],
+  options: SemanticRankOptions
+): RankedCandidate[] {
+  const overfetchLimit = Math.max(options.limit * 4, options.limit);
+  const bounded = semanticResults.slice(0, overfetchLimit);
+  return rerankResults(query, bounded, options.rerankTopN, {
+    prioritizeSourcePaths: options.prioritizeSourcePaths ?? false,
+  });
+}
+
+function promoteIdentifierMatches(
+  query: string,
+  combined: RankedCandidate[],
+  semanticCandidates: RankedCandidate[],
+  keywordCandidates: RankedCandidate[],
+  database?: Database,
+  branchChunkIds?: Set<string> | null
+): RankedCandidate[] {
+  if (combined.length === 0) {
+    return combined;
+  }
+
+  if (classifyQueryIntentRaw(query) !== "source") {
+    return combined;
+  }
+
+  const identifierHints = extractIdentifierHints(query);
+  if (identifierHints.length === 0) {
+    return combined;
+  }
+
+  const combinedById = new Map(combined.map((candidate) => [candidate.id, candidate]));
+  const candidateUnion = new Map<string, RankedCandidate>();
+  for (const candidate of semanticCandidates) {
+    candidateUnion.set(candidate.id, candidate);
+  }
+  for (const candidate of keywordCandidates) {
+    if (!candidateUnion.has(candidate.id)) {
+      candidateUnion.set(candidate.id, candidate);
+    }
+  }
+
+  if (database) {
+    for (const identifier of identifierHints) {
+      const symbols = database.getSymbolsByName(identifier);
+      for (const symbol of symbols) {
+        const chunks = database.getChunksByFile(symbol.filePath);
+        for (const chunk of chunks) {
+          if (branchChunkIds && !branchChunkIds.has(chunk.chunkId)) {
+            continue;
+          }
+
+          const chunkType = ((chunk.nodeType ?? "other") as ChunkMetadata["chunkType"]);
+          if (!isImplementationChunkType(chunkType)) {
+            continue;
+          }
+
+          if (!isLikelyImplementationPath(chunk.filePath)) {
+            continue;
+          }
+
+          if (chunk.startLine > symbol.startLine || chunk.endLine < symbol.endLine) {
+            continue;
+          }
+
+          const existing = combinedById.get(chunk.chunkId) ?? candidateUnion.get(chunk.chunkId);
+          const metadata: ChunkMetadata = existing?.metadata ?? {
+            filePath: chunk.filePath,
+            startLine: chunk.startLine,
+            endLine: chunk.endLine,
+            chunkType,
+            name: chunk.name ?? undefined,
+            language: chunk.language,
+            hash: chunk.contentHash,
+          };
+
+          const baselineScore = existing?.score ?? 0.5;
+          candidateUnion.set(chunk.chunkId, {
+            id: chunk.chunkId,
+            score: Math.min(1, baselineScore + 0.5),
+            metadata,
+          });
+        }
+      }
+    }
+  }
+
+  const promoted: RankedCandidate[] = [];
+  for (const candidate of candidateUnion.values()) {
+    const filePathLower = candidate.metadata.filePath.toLowerCase();
+    const nameLower = (candidate.metadata.name ?? "").toLowerCase();
+    const exactIdentifierMatch = identifierHints.some((hint) => nameLower === hint);
+    const hasIdentifierMatch = exactIdentifierMatch || identifierHints.some((hint) =>
+      nameLower.includes(hint) ||
+      filePathLower.includes(hint)
+    );
+
+    if (!hasIdentifierMatch) {
+      continue;
+    }
+
+    if (!isImplementationChunkType(candidate.metadata.chunkType)) {
+      continue;
+    }
+
+    if (!isLikelyImplementationPath(candidate.metadata.filePath)) {
+      continue;
+    }
+
+    const existing = combinedById.get(candidate.id) ?? candidate;
+    const rescueBoost = exactIdentifierMatch ? 0.45 : 0.25;
+    const boostedScore = Math.min(1, Math.max(existing.score, candidate.score) + rescueBoost);
+    promoted.push({
+      id: existing.id,
+      score: boostedScore,
+      metadata: existing.metadata,
+    });
+  }
+
+  if (promoted.length === 0) {
+    return combined;
+  }
+
+  promoted.sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
+
+  const promotedIds = new Set(promoted.map((candidate) => candidate.id));
+  const remainder = combined.filter((candidate) => !promotedIds.has(candidate.id));
+  return [...promoted, ...remainder];
+}
+
+function buildSymbolDefinitionLane(
+  query: string,
+  database: Database,
+  branchChunkIds: Set<string> | null,
+  limit: number,
+  fallbackCandidates: RankedCandidate[]
+): RankedCandidate[] {
+  if (classifyQueryIntentRaw(query) !== "source") {
+    return [];
+  }
+
+  const identifierHints = extractIdentifierHints(query);
+  const codeTermHints = extractCodeTermHints(query);
+  if (identifierHints.length === 0 && codeTermHints.length === 0) {
+    return [];
+  }
+
+  const symbolCandidates = new Map<string, RankedCandidate>();
+  const filePathHint = extractFilePathHint(query);
+  const primaryHint = extractPrimaryIdentifierQueryHint(query);
+
+  const upsertChunkCandidate = (
+    chunk: ReturnType<Database["getChunksByName"]>[number],
+    identifier: string,
+    normalizedIdentifier: string,
+    baseScore?: number
+  ) => {
+    if (branchChunkIds && !branchChunkIds.has(chunk.chunkId)) {
+      return;
+    }
+
+    const chunkType = (chunk.nodeType ?? "other") as ChunkMetadata["chunkType"];
+    if (!isImplementationChunkType(chunkType)) {
+      return;
+    }
+
+    if (!isLikelyImplementationPath(chunk.filePath)) {
+      return;
+    }
+
+    const nameLower = (chunk.name ?? "").toLowerCase();
+    const exactName =
+      nameLower === identifier ||
+      nameLower.replace(/_/g, "") === normalizedIdentifier;
+    const base = baseScore ?? (exactName ? 0.99 : 0.88);
+
+    const existing = symbolCandidates.get(chunk.chunkId);
+    if (!existing || base > existing.score) {
+      symbolCandidates.set(chunk.chunkId, {
+        id: chunk.chunkId,
+        score: base,
+        metadata: {
+          filePath: chunk.filePath,
+          startLine: chunk.startLine,
+          endLine: chunk.endLine,
+          chunkType,
+          name: chunk.name ?? undefined,
+          language: chunk.language,
+          hash: chunk.contentHash,
+        },
+      });
+    }
+  };
+
+  const normalizedHints = identifierHints
+    .flatMap((hint) => [
+      hint,
+      hint.replace(/_/g, ""),
+      hint.replace(/_/g, "-")
+    ])
+    .filter((hint, idx, arr) => hint.length >= 3 && arr.indexOf(hint) === idx)
+    .slice(0, 6);
+
+  for (const identifier of normalizedHints) {
+    const symbols = [
+      ...database.getSymbolsByName(identifier),
+      ...database.getSymbolsByNameCi(identifier),
+    ];
+
+    const chunksByName = [
+      ...database.getChunksByName(identifier),
+      ...database.getChunksByNameCi(identifier),
+    ];
+
+    const normalizedIdentifier = identifier.replace(/_/g, "");
+
+    const dedupSymbols = new Map<string, typeof symbols[number]>();
+    for (const symbol of symbols) {
+      dedupSymbols.set(symbol.id, symbol);
+    }
+
+    for (const symbol of dedupSymbols.values()) {
+      const chunks = database.getChunksByFile(symbol.filePath);
+      for (const chunk of chunks) {
+        if (chunk.startLine > symbol.startLine || chunk.endLine < symbol.endLine) {
+          continue;
+        }
+
+        upsertChunkCandidate(chunk, identifier, normalizedIdentifier);
+      }
+    }
+
+    const dedupChunksByName = new Map<string, typeof chunksByName[number]>();
+    for (const chunk of chunksByName) {
+      dedupChunksByName.set(chunk.chunkId, chunk);
+    }
+
+    for (const chunk of dedupChunksByName.values()) {
+      upsertChunkCandidate(chunk, identifier, normalizedIdentifier);
+    }
+  }
+
+  if (filePathHint && primaryHint) {
+    const primaryChunks = [
+      ...database.getChunksByName(primaryHint),
+      ...database.getChunksByNameCi(primaryHint),
+    ];
+    const dedupPrimaryChunks = new Map<string, typeof primaryChunks[number]>();
+    for (const chunk of primaryChunks) {
+      dedupPrimaryChunks.set(chunk.chunkId, chunk);
+    }
+
+    for (const chunk of dedupPrimaryChunks.values()) {
+      if (!pathMatchesHint(chunk.filePath, filePathHint)) {
+        continue;
+      }
+      const normalizedPrimary = primaryHint.replace(/_/g, "");
+      upsertChunkCandidate(chunk, primaryHint, normalizedPrimary, 1.0);
+    }
+  }
+
+  const ranked = Array.from(symbolCandidates.values()).sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
+  if (ranked.length === 0) {
+    const implementationFallback = fallbackCandidates.filter((candidate) =>
+      isImplementationChunkType(candidate.metadata.chunkType) &&
+      isLikelyImplementationPath(candidate.metadata.filePath)
+    );
+
+    for (const candidate of implementationFallback) {
+      const nameLower = (candidate.metadata.name ?? "").toLowerCase();
+      const pathLower = candidate.metadata.filePath.toLowerCase();
+
+      const exactHintMatch = normalizedHints.some((hint) => nameLower === hint || nameLower.replace(/_/g, "") === hint.replace(/_/g, ""));
+      const tokenizedName = tokenizeTextForRanking(nameLower);
+      const tokenHits = codeTermHints.filter((term) => tokenizedName.has(term) || pathLower.includes(term)).length;
+
+      if (!exactHintMatch && tokenHits === 0) {
+        continue;
+      }
+
+      const laneScore = exactHintMatch
+        ? Math.min(1, Math.max(candidate.score, 0.97))
+        : Math.min(0.95, Math.max(candidate.score, 0.82 + tokenHits * 0.03));
+      symbolCandidates.set(candidate.id, {
+        id: candidate.id,
+        score: laneScore,
+        metadata: candidate.metadata,
+      });
+    }
+
+    if (symbolCandidates.size === 0) {
+      const queryTokenSet = tokenizeTextForRanking(query);
+      const rankedFallback = implementationFallback
+        .map((candidate) => {
+          const nameTokens = tokenizeTextForRanking(candidate.metadata.name ?? "");
+          const pathTokens = splitPathTokens(candidate.metadata.filePath);
+          let overlap = 0;
+          for (const token of queryTokenSet) {
+            if (nameTokens.has(token) || pathTokens.has(token)) {
+              overlap += 1;
+            }
+          }
+          const overlapScore = queryTokenSet.size > 0 ? overlap / queryTokenSet.size : 0;
+          return {
+            candidate,
+            overlapScore,
+          };
+        })
+        .filter((entry) => entry.overlapScore > 0)
+        .sort((a, b) => b.overlapScore - a.overlapScore || b.candidate.score - a.candidate.score)
+        .slice(0, Math.max(limit, 3));
+
+      for (const entry of rankedFallback) {
+        symbolCandidates.set(entry.candidate.id, {
+          id: entry.candidate.id,
+          score: Math.min(0.94, Math.max(entry.candidate.score, 0.8 + entry.overlapScore * 0.1)),
+          metadata: entry.candidate.metadata,
+        });
+      }
+    }
+  }
+
+  const withFallback = Array.from(symbolCandidates.values()).sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
+  return withFallback.slice(0, Math.max(limit * 2, limit));
+}
+
+function buildIdentifierDefinitionLane(
+  query: string,
+  candidates: RankedCandidate[],
+  limit: number
+): RankedCandidate[] {
+  if (classifyQueryIntentRaw(query) !== "source") {
+    return [];
+  }
+
+  const primaryHint = extractPrimaryIdentifierQueryHint(query);
+  if (!primaryHint) {
+    return [];
+  }
+
+  const hints = [primaryHint, ...extractIdentifierHints(query), ...extractCodeTermHints(query)].slice(0, 8);
+  const scored = candidates
+    .filter((candidate) =>
+      isLikelyImplementationPath(candidate.metadata.filePath) &&
+      isImplementationChunkType(candidate.metadata.chunkType)
+    )
+    .map((candidate) => {
+      const matchScore = scoreIdentifierMatch(candidate.metadata.name, candidate.metadata.filePath, hints);
+      return {
+        candidate,
+        matchScore,
+      };
+    })
+    .filter((entry) => entry.matchScore > 0)
+    .sort((a, b) => {
+      if (b.matchScore !== a.matchScore) return b.matchScore - a.matchScore;
+      if (b.candidate.score !== a.candidate.score) return b.candidate.score - a.candidate.score;
+      return a.candidate.id.localeCompare(b.candidate.id);
+    })
+    .slice(0, Math.max(limit * 2, 10));
+
+  return scored.map((entry) => ({
+    id: entry.candidate.id,
+    score: Math.min(1, 0.9 + entry.matchScore * 0.09),
+    metadata: entry.candidate.metadata,
+  }));
+}
+
+export function mergeTieredResults(
+  symbolLane: RankedCandidate[],
+  hybridLane: RankedCandidate[],
+  limit: number
+): RankedCandidate[] {
+  if (symbolLane.length === 0) {
+    return hybridLane.slice(0, limit);
+  }
+
+  const out: RankedCandidate[] = [];
+  const seen = new Set<string>();
+
+  for (const candidate of symbolLane) {
+    if (seen.has(candidate.id)) continue;
+    out.push(candidate);
+    seen.add(candidate.id);
+    if (out.length >= limit) return out;
+  }
+
+  for (const candidate of hybridLane) {
+    if (seen.has(candidate.id)) continue;
+    out.push(candidate);
+    seen.add(candidate.id);
+    if (out.length >= limit) return out;
+  }
+
+  return out;
+}
+
+function unionCandidates(
+  semanticCandidates: RankedCandidate[],
+  keywordCandidates: RankedCandidate[]
+): RankedCandidate[] {
+  const byId = new Map<string, RankedCandidate>();
+  for (const candidate of semanticCandidates) {
+    byId.set(candidate.id, candidate);
+  }
+  for (const candidate of keywordCandidates) {
+    const existing = byId.get(candidate.id);
+    if (!existing || candidate.score > existing.score) {
+      byId.set(candidate.id, candidate);
+    }
+  }
+  return Array.from(byId.values());
+}
 
 export class Indexer {
   private config: ParsedCodebaseIndexConfig;
@@ -1260,17 +2363,24 @@ export class Indexer {
 
     const maxResults = limit ?? this.config.search.maxResults;
     const hybridWeight = options?.hybridWeight ?? this.config.search.hybridWeight;
+    const fusionStrategy = this.config.search.fusionStrategy;
+    const rrfK = this.config.search.rrfK;
+    const rerankTopN = this.config.search.rerankTopN;
     const filterByBranch = options?.filterByBranch ?? true;
 
     this.logger.search("debug", "Starting search", {
       query,
       maxResults,
       hybridWeight,
+      fusionStrategy,
+      rrfK,
+      rerankTopN,
       filterByBranch,
     });
 
     const embeddingStartTime = performance.now();
-    const embedding = await this.getQueryEmbedding(query, provider);
+    const embeddingQuery = stripFilePathHint(query);
+    const embedding = await this.getQueryEmbedding(embeddingQuery, provider);
     const embeddingMs = performance.now() - embeddingStartTime;
 
     const vectorStartTime = performance.now();
@@ -1281,19 +2391,95 @@ export class Indexer {
     const keywordResults = await this.keywordSearch(query, maxResults * 4);
     const keywordMs = performance.now() - keywordStartTime;
 
-    const fusionStartTime = performance.now();
-    const combined = this.fuseResults(semanticResults, keywordResults, hybridWeight, maxResults * 4);
-    const fusionMs = performance.now() - fusionStartTime;
-
     let branchChunkIds: Set<string> | null = null;
     if (filterByBranch && this.currentBranch !== "default") {
       branchChunkIds = new Set(database.getBranchChunkIds(this.currentBranch));
     }
 
-    const filtered = combined.filter((r) => {
-      if (r.score < this.config.search.minScore) return false;
+    const prefilterStartTime = performance.now();
+    const shouldPrefilterByBranch = branchChunkIds !== null && branchChunkIds.size > 0;
+    const prefilteredSemantic = shouldPrefilterByBranch && branchChunkIds
+      ? semanticResults.filter((r) => branchChunkIds.has(r.id))
+      : semanticResults;
+    const prefilteredKeyword = shouldPrefilterByBranch && branchChunkIds
+      ? keywordResults.filter((r) => branchChunkIds.has(r.id))
+      : keywordResults;
 
-      if (branchChunkIds && !branchChunkIds.has(r.id)) return false;
+    const semanticCandidates = (shouldPrefilterByBranch && semanticResults.length > 0 && prefilteredSemantic.length === 0)
+      ? semanticResults
+      : prefilteredSemantic;
+    const keywordCandidates = (shouldPrefilterByBranch && keywordResults.length > 0 && prefilteredKeyword.length === 0)
+      ? keywordResults
+      : prefilteredKeyword;
+    const prefilterMs = performance.now() - prefilterStartTime;
+
+    if (branchChunkIds && branchChunkIds.size === 0) {
+      this.logger.search("warn", "Branch prefilter skipped because branch catalog is empty", {
+        branch: this.currentBranch,
+      });
+    }
+
+    if (shouldPrefilterByBranch && semanticResults.length > 0 && prefilteredSemantic.length === 0) {
+      this.logger.search("warn", "Branch prefilter produced no semantic overlap, using unfiltered semantic candidates", {
+        branch: this.currentBranch,
+      });
+    }
+
+    if (shouldPrefilterByBranch && keywordResults.length > 0 && prefilteredKeyword.length === 0) {
+      this.logger.search("warn", "Branch prefilter produced no keyword overlap, using unfiltered keyword candidates", {
+        branch: this.currentBranch,
+      });
+    }
+
+    const fusionStartTime = performance.now();
+    const combined = rankHybridResults(query, semanticCandidates, keywordCandidates, {
+      fusionStrategy,
+      rrfK,
+      rerankTopN,
+      limit: maxResults,
+      hybridWeight,
+    });
+    const fusionMs = performance.now() - fusionStartTime;
+
+    const rescued = promoteIdentifierMatches(
+      query,
+      combined,
+      semanticCandidates,
+      keywordCandidates,
+      database,
+      branchChunkIds
+    );
+
+    const union = unionCandidates(semanticCandidates, keywordCandidates);
+
+    const deterministicIdentifierLane = buildDeterministicIdentifierPass(
+      query,
+      union,
+      maxResults
+    );
+
+    const identifierLane = buildIdentifierDefinitionLane(
+      query,
+      union,
+      maxResults
+    );
+
+    const symbolLane = buildSymbolDefinitionLane(
+      query,
+      database,
+      branchChunkIds,
+      maxResults,
+      union
+    );
+
+    const prePrimaryLane = mergeTieredResults(deterministicIdentifierLane, identifierLane, maxResults * 4);
+    const primaryLane = mergeTieredResults(prePrimaryLane, symbolLane, maxResults * 4);
+    const tiered = mergeTieredResults(primaryLane, rescued, maxResults * 4);
+    const sourceIntent = classifyQueryIntentRaw(query) === "source";
+    const hasCodeHints = extractCodeTermHints(query).length > 0 || extractIdentifierHints(query).length > 0;
+
+    const baseFiltered = tiered.filter((r) => {
+      if (r.score < this.config.search.minScore) return false;
 
       if (options?.fileType) {
         const ext = r.metadata.filePath.split(".").pop()?.toLowerCase();
@@ -1311,7 +2497,17 @@ export class Indexer {
       }
 
       return true;
-    }).slice(0, maxResults);
+    });
+
+    const implementationOnly = baseFiltered.filter((r) =>
+      isLikelyImplementationPath(r.metadata.filePath) &&
+      isImplementationChunkType(r.metadata.chunkType)
+    );
+
+    const filtered = (sourceIntent && hasCodeHints && implementationOnly.length > 0
+      ? implementationOnly
+      : baseFiltered
+    ).slice(0, maxResults);
 
     const totalSearchMs = performance.now() - searchStartTime;
     this.logger.recordSearch(totalSearchMs, {
@@ -1327,6 +2523,7 @@ export class Indexer {
       embeddingMs: Math.round(embeddingMs * 100) / 100,
       vectorMs: Math.round(vectorMs * 100) / 100,
       keywordMs: Math.round(keywordMs * 100) / 100,
+      prefilterMs: Math.round(prefilterMs * 100) / 100,
       fusionMs: Math.round(fusionMs * 100) / 100,
     });
 
@@ -1394,44 +2591,6 @@ export class Indexer {
         results.push({ id: chunkId, score, metadata });
       }
     }
-
-    results.sort((a, b) => b.score - a.score);
-    return results.slice(0, limit);
-  }
-
-  private fuseResults(
-    semanticResults: Array<{ id: string; score: number; metadata: ChunkMetadata }>,
-    keywordResults: Array<{ id: string; score: number; metadata: ChunkMetadata }>,
-    keywordWeight: number,
-    limit: number
-  ): Array<{ id: string; score: number; metadata: ChunkMetadata }> {
-    const semanticWeight = 1 - keywordWeight;
-    const fusedScores = new Map<string, { score: number; metadata: ChunkMetadata }>();
-
-    for (const r of semanticResults) {
-      fusedScores.set(r.id, {
-        score: r.score * semanticWeight,
-        metadata: r.metadata,
-      });
-    }
-
-    for (const r of keywordResults) {
-      const existing = fusedScores.get(r.id);
-      if (existing) {
-        existing.score += r.score * keywordWeight;
-      } else {
-        fusedScores.set(r.id, {
-          score: r.score * keywordWeight,
-          metadata: r.metadata,
-        });
-      }
-    }
-
-    const results = Array.from(fusedScores.entries()).map(([id, data]) => ({
-      id,
-      score: data.score,
-      metadata: data.metadata,
-    }));
 
     results.sort((a, b) => b.score - a.score);
     return results.slice(0, limit);
@@ -1674,10 +2833,38 @@ export class Indexer {
       branchChunkIds = new Set(database.getBranchChunkIds(this.currentBranch));
     }
 
-    const filtered = semanticResults.filter((r) => {
-      if (r.score < this.config.search.minScore) return false;
+    const prefilterStartTime = performance.now();
+    const shouldPrefilterByBranch = branchChunkIds !== null && branchChunkIds.size > 0;
+    const prefilteredSemantic = shouldPrefilterByBranch && branchChunkIds
+      ? semanticResults.filter((r) => branchChunkIds.has(r.id))
+      : semanticResults;
+    const semanticCandidates = (shouldPrefilterByBranch && semanticResults.length > 0 && prefilteredSemantic.length === 0)
+      ? semanticResults
+      : prefilteredSemantic;
+    const prefilterMs = performance.now() - prefilterStartTime;
 
-      if (branchChunkIds && !branchChunkIds.has(r.id)) return false;
+    if (branchChunkIds && branchChunkIds.size === 0) {
+      this.logger.search("warn", "Branch prefilter skipped because branch catalog is empty", {
+        branch: this.currentBranch,
+      });
+    }
+
+    if (shouldPrefilterByBranch && semanticResults.length > 0 && prefilteredSemantic.length === 0) {
+      this.logger.search("warn", "Branch prefilter produced no semantic overlap, using unfiltered semantic candidates", {
+        branch: this.currentBranch,
+      });
+    }
+
+    const rerankTopN = this.config.search.rerankTopN;
+
+    const ranked = rankSemanticOnlyResults(code, semanticCandidates, {
+      rerankTopN,
+      limit,
+      prioritizeSourcePaths: false,
+    });
+
+    const filtered = ranked.filter((r) => {
+      if (r.score < this.config.search.minScore) return false;
 
       if (options?.excludeFile) {
         if (r.metadata.filePath === options.excludeFile) return false;
@@ -1714,6 +2901,7 @@ export class Indexer {
       totalMs: Math.round(totalSearchMs * 100) / 100,
       embeddingMs: Math.round(embeddingMs * 100) / 100,
       vectorMs: Math.round(vectorMs * 100) / 100,
+      prefilterMs: Math.round(prefilterMs * 100) / 100,
     });
 
     return Promise.all(

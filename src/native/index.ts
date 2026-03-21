@@ -634,6 +634,14 @@ export class Database {
     return this.inner.getChunksByFile(filePath);
   }
 
+  getChunksByName(name: string): ChunkData[] {
+    return this.inner.getChunksByName(name);
+  }
+
+  getChunksByNameCi(name: string): ChunkData[] {
+    return this.inner.getChunksByNameCi(name);
+  }
+
   deleteChunksByFile(filePath: string): number {
     return this.inner.deleteChunksByFile(filePath);
   }
@@ -708,6 +716,14 @@ export class Database {
 
   getSymbolByName(name: string, filePath: string): SymbolData | null {
     return this.inner.getSymbolByName(name, filePath) ?? null;
+  }
+
+  getSymbolsByName(name: string): SymbolData[] {
+    return this.inner.getSymbolsByName(name);
+  }
+
+  getSymbolsByNameCi(name: string): SymbolData[] {
+    return this.inner.getSymbolsByNameCi(name);
   }
 
   deleteSymbolsByFile(filePath: string): number {

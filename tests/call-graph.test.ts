@@ -137,6 +137,14 @@ describe("call-graph", () => {
       const names = retrieved.map((s) => s.name);
       expect(names).toContain("fooFunc");
       expect(names).toContain("barFunc");
+
+      const byName = db.getSymbolsByName("fooFunc");
+      expect(byName.length).toBe(1);
+      expect(byName[0]?.filePath).toBe("/src/foo.ts");
+
+      const byNameCi = db.getSymbolsByNameCi("foofunc");
+      expect(byNameCi.length).toBe(1);
+      expect(byNameCi[0]?.filePath).toBe("/src/foo.ts");
     });
 
     it("should store call edges", () => {

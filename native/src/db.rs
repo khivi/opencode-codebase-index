@@ -13,7 +13,7 @@ pub enum DbError {
 pub type DbResult<T> = Result<T, DbError>;
 
 /// Schema version for migrations
-const SCHEMA_VERSION: i32 = 3;
+const SCHEMA_VERSION: i32 = 4;
 
 /// Maximum number of SQL bind parameters per query.
 /// SQLite defaults to 999 (SQLITE_MAX_VARIABLE_NUMBER). We use 900 to stay safely under.
@@ -94,6 +94,8 @@ fn migrate_schema(conn: &Connection, from_version: i32) -> DbResult<()> {
             -- Indexes for fast lookups
             CREATE INDEX IF NOT EXISTS idx_chunks_content_hash ON chunks(content_hash);
             CREATE INDEX IF NOT EXISTS idx_chunks_file_path ON chunks(file_path);
+            CREATE INDEX IF NOT EXISTS idx_chunks_name ON chunks(name);
+            CREATE INDEX IF NOT EXISTS idx_chunks_name_lower ON chunks(lower(name));
             CREATE INDEX IF NOT EXISTS idx_branch_chunks_branch ON branch_chunks(branch);
             CREATE INDEX IF NOT EXISTS idx_branch_chunks_chunk_id ON branch_chunks(chunk_id);
             "#,
@@ -160,7 +162,7 @@ fn migrate_schema(conn: &Connection, from_version: i32) -> DbResult<()> {
             params![SCHEMA_VERSION.to_string()],
         )?;
     }
-    if (2..3).contains(&from_version) {
+    if from_version < 3 {
         conn.execute_batch(
             r#"
             PRAGMA foreign_keys = OFF;
@@ -193,6 +195,20 @@ fn migrate_schema(conn: &Connection, from_version: i32) -> DbResult<()> {
             COMMIT;
 
             PRAGMA foreign_keys = ON;
+            "#,
+        )?;
+
+        conn.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_version', ?)",
+            params![SCHEMA_VERSION.to_string()],
+        )?;
+    }
+
+    if from_version < 4 {
+        conn.execute_batch(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_chunks_name ON chunks(name);
+            CREATE INDEX IF NOT EXISTS idx_chunks_name_lower ON chunks(lower(name));
             "#,
         )?;
 
@@ -460,6 +476,62 @@ pub fn get_chunks_by_file(conn: &Connection, file_path: &str) -> DbResult<Vec<Ch
     )?;
 
     let rows = stmt.query_map(params![file_path], |row| {
+        Ok(ChunkRow {
+            chunk_id: row.get(0)?,
+            content_hash: row.get(1)?,
+            file_path: row.get(2)?,
+            start_line: row.get(3)?,
+            end_line: row.get(4)?,
+            node_type: row.get(5)?,
+            name: row.get(6)?,
+            language: row.get(7)?,
+        })
+    })?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        results.push(row?);
+    }
+    Ok(results)
+}
+
+pub fn get_chunks_by_name(conn: &Connection, name: &str) -> DbResult<Vec<ChunkRow>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT chunk_id, content_hash, file_path, start_line, end_line, node_type, name, language
+        FROM chunks WHERE name = ?
+        "#,
+    )?;
+
+    let rows = stmt.query_map(params![name], |row| {
+        Ok(ChunkRow {
+            chunk_id: row.get(0)?,
+            content_hash: row.get(1)?,
+            file_path: row.get(2)?,
+            start_line: row.get(3)?,
+            end_line: row.get(4)?,
+            node_type: row.get(5)?,
+            name: row.get(6)?,
+            language: row.get(7)?,
+        })
+    })?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        results.push(row?);
+    }
+    Ok(results)
+}
+
+pub fn get_chunks_by_name_ci(conn: &Connection, name: &str) -> DbResult<Vec<ChunkRow>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT chunk_id, content_hash, file_path, start_line, end_line, node_type, name, language
+        FROM chunks WHERE lower(name) = lower(?)
+        "#,
+    )?;
+
+    let rows = stmt.query_map(params![name], |row| {
         Ok(ChunkRow {
             chunk_id: row.get(0)?,
             content_hash: row.get(1)?,
@@ -785,6 +857,64 @@ pub fn get_symbol_by_name(
         )
         .optional()?;
     Ok(result)
+}
+
+pub fn get_symbols_by_name(conn: &Connection, name: &str) -> DbResult<Vec<SymbolRow>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT id, file_path, name, kind, start_line, start_col, end_line, end_col, language
+        FROM symbols WHERE name = ?
+        "#,
+    )?;
+
+    let rows = stmt.query_map(params![name], |row| {
+        Ok(SymbolRow {
+            id: row.get(0)?,
+            file_path: row.get(1)?,
+            name: row.get(2)?,
+            kind: row.get(3)?,
+            start_line: row.get(4)?,
+            start_col: row.get(5)?,
+            end_line: row.get(6)?,
+            end_col: row.get(7)?,
+            language: row.get(8)?,
+        })
+    })?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        results.push(row?);
+    }
+    Ok(results)
+}
+
+pub fn get_symbols_by_name_ci(conn: &Connection, name: &str) -> DbResult<Vec<SymbolRow>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT id, file_path, name, kind, start_line, start_col, end_line, end_col, language
+        FROM symbols WHERE lower(name) = lower(?)
+        "#,
+    )?;
+
+    let rows = stmt.query_map(params![name], |row| {
+        Ok(SymbolRow {
+            id: row.get(0)?,
+            file_path: row.get(1)?,
+            name: row.get(2)?,
+            kind: row.get(3)?,
+            start_line: row.get(4)?,
+            start_col: row.get(5)?,
+            end_line: row.get(6)?,
+            end_col: row.get(7)?,
+            language: row.get(8)?,
+        })
+    })?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        results.push(row?);
+    }
+    Ok(results)
 }
 
 /// Delete all symbols for a file
@@ -1214,7 +1344,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "3");
+        assert_eq!(version, "4");
     }
 
     #[test]
@@ -1341,6 +1471,14 @@ mod tests {
         assert!(found.is_some());
         assert_eq!(found.unwrap().id, "sym1");
 
+        let by_name = get_symbols_by_name(&conn, "handleRequest").unwrap();
+        assert_eq!(by_name.len(), 1);
+        assert_eq!(by_name[0].id, "sym1");
+
+        let by_name_ci = get_symbols_by_name_ci(&conn, "handlerequest").unwrap();
+        assert_eq!(by_name_ci.len(), 1);
+        assert_eq!(by_name_ci[0].id, "sym1");
+
         // Not found
         let missing = get_symbol_by_name(&conn, "missing", "src/main.ts").unwrap();
         assert!(missing.is_none());
@@ -1399,6 +1537,10 @@ mod tests {
         let file_b = get_symbols_by_file(&conn, "src/b.ts").unwrap();
         assert_eq!(file_b.len(), 1);
         assert_eq!(file_b[0].kind, "class");
+
+        let foo = get_symbols_by_name(&conn, "foo").unwrap();
+        assert_eq!(foo.len(), 1);
+        assert_eq!(foo[0].id, "s1");
     }
 
     #[test]
@@ -1636,7 +1778,7 @@ mod tests {
     }
 
     #[test]
-    fn test_migration_v3_adds_cascade_on_call_edges() {
+    fn test_migration_v4_adds_cascade_on_call_edges_and_chunk_name_indexes() {
         let temp_dir = tempfile::tempdir().unwrap();
         let db_path = temp_dir.path().join("migration-v2.db");
 
@@ -1647,6 +1789,28 @@ mod tests {
                 CREATE TABLE metadata (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
+                );
+                CREATE TABLE embeddings (
+                    content_hash TEXT PRIMARY KEY,
+                    embedding BLOB NOT NULL,
+                    chunk_text TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    created_at INTEGER NOT NULL
+                );
+                CREATE TABLE chunks (
+                    chunk_id TEXT PRIMARY KEY,
+                    content_hash TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    start_line INTEGER NOT NULL,
+                    end_line INTEGER NOT NULL,
+                    node_type TEXT,
+                    name TEXT,
+                    language TEXT NOT NULL
+                );
+                CREATE TABLE branch_chunks (
+                    branch TEXT NOT NULL,
+                    chunk_id TEXT NOT NULL,
+                    PRIMARY KEY (branch, chunk_id)
                 );
                 CREATE TABLE symbols (
                     id TEXT PRIMARY KEY,
@@ -1688,12 +1852,24 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(schema_version, "3");
+        assert_eq!(schema_version, "4");
 
         let on_delete: String = conn
             .query_row("PRAGMA foreign_key_list(call_edges)", [], |row| row.get(6))
             .unwrap();
         assert_eq!(on_delete.to_uppercase(), "CASCADE");
+
+        let mut stmt = conn.prepare("PRAGMA index_list('chunks')").unwrap();
+        let index_names: Vec<String> = stmt
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect();
+
+        assert!(index_names.iter().any(|name| name == "idx_chunks_name"));
+        assert!(index_names
+            .iter()
+            .any(|name| name == "idx_chunks_name_lower"));
     }
 
     #[test]

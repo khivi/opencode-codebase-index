@@ -330,17 +330,68 @@ fn is_semantic_node(node_type: &str, language: &Language) -> bool {
 fn extract_name(cursor: &tree_sitter::TreeCursor, source: &str) -> Option<String> {
     let node = cursor.node();
 
+    let extract_identifier = |n: tree_sitter::Node| -> Option<String> {
+        let kind = n.kind();
+        if kind == "identifier"
+            || kind == "property_identifier"
+            || kind == "type_identifier"
+            || kind == "name"
+        {
+            return Some(source[n.start_byte()..n.end_byte()].to_string());
+        }
+        None
+    };
+
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i) {
-            let kind = child.kind();
-            if kind == "identifier"
-                || kind == "property_identifier"
-                || kind == "type_identifier"
-                || kind == "name"
-            {
-                let start = child.start_byte();
-                let end = child.end_byte();
-                return Some(source[start..end].to_string());
+            if let Some(name) = extract_identifier(child) {
+                return Some(name);
+            }
+        }
+    }
+
+    if node.kind() == "export_statement" {
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i) {
+                let child_kind = child.kind();
+                if matches!(
+                    child_kind,
+                    "function_declaration"
+                        | "class_declaration"
+                        | "interface_declaration"
+                        | "type_alias_declaration"
+                        | "enum_declaration"
+                        | "lexical_declaration"
+                        | "abstract_class_declaration"
+                ) {
+                    for j in 0..child.child_count() {
+                        if let Some(grandchild) = child.child(j) {
+                            if let Some(name) = extract_identifier(grandchild) {
+                                return Some(name);
+                            }
+                        }
+                    }
+
+                    if child_kind == "lexical_declaration" {
+                        for j in 0..child.child_count() {
+                            if let Some(declarator) = child.child(j) {
+                                if declarator.kind() == "variable_declarator" {
+                                    for k in 0..declarator.child_count() {
+                                        if let Some(name_node) = declarator.child(k) {
+                                            if name_node.kind() == "identifier" {
+                                                return Some(
+                                                    source[name_node.start_byte()
+                                                        ..name_node.end_byte()]
+                                                        .to_string(),
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -396,24 +447,22 @@ fn merge_small_chunks(chunks: &mut Vec<CodeChunk>) {
     let mut current: Option<CodeChunk> = None;
 
     for chunk in chunks.drain(..) {
-        match current.take() {
-            None => {
-                current = Some(chunk);
-            }
-            Some(mut cur) => {
-                if cur.content.len() < MIN_CHUNK_SIZE * 2
-                    && cur.content.len() + chunk.content.len() <= MAX_CHUNK_SIZE
-                    && cur.end_line + 1 >= chunk.start_line
-                {
-                    cur.content.push_str("\n\n");
-                    cur.content.push_str(&chunk.content);
-                    cur.end_line = chunk.end_line;
-                    current = Some(cur);
-                } else {
-                    merged.push(cur);
-                    current = Some(chunk);
-                }
-            }
+        let Some(mut cur) = current.take() else {
+            current = Some(chunk);
+            continue;
+        };
+
+        if cur.content.len() < MIN_CHUNK_SIZE * 2
+            && cur.content.len() + chunk.content.len() <= MAX_CHUNK_SIZE
+            && cur.end_line + 1 >= chunk.start_line
+        {
+            cur.content.push_str("\n\n");
+            cur.content.push_str(&chunk.content);
+            cur.end_line = chunk.end_line;
+            current = Some(cur);
+        } else {
+            merged.push(cur);
+            current = Some(chunk);
         }
     }
 
