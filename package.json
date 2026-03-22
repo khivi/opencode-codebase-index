@@ -1,5 +1,5 @@
 {
-  "name": "opencode-codebase-index",
+  "name": "@khivi/opencode-codebase-index",
   "version": "0.5.2",
   "description": "Semantic codebase indexing and search for OpenCode - find code by meaning, not just keywords",
   "type": "module",
@@ -13,13 +13,14 @@
     }
   },
   "bin": {
-    "opencode-codebase-index-mcp": "dist/cli.js"
+    "opencode-codebase-index-mcp": "dist/cli.js",
+    "codebase-index": "dist/git-cli.js"
   },
   "license": "MIT",
   "author": "Kenneth",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Helweg/opencode-codebase-index"
+    "url": "https://github.com/khivi/opencode-codebase-index"
   },
   "keywords": [
     "opencode",
