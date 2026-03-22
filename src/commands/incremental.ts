@@ -5,7 +5,9 @@ import { loadPluginConfig } from "./config-loader.js";
 
 export async function runIncremental(): Promise<void> {
   const root = repoRoot();
-  const files = activeFiles(root);
+  const rawConfig = loadPluginConfig(root);
+  const config = parseConfig(rawConfig);
+  const files = activeFiles(root, config.include);
   const stored = loadHashes(root);
   const current: Record<string, string> = {};
   const changed: string[] = [];
@@ -28,8 +30,6 @@ export async function runIncremental(): Promise<void> {
   }
 
   // Initialize indexer and run full index (it handles incremental via file-hash cache internally)
-  const rawConfig = loadPluginConfig(root);
-  const config = parseConfig(rawConfig);
   const indexer = new Indexer(root, config);
   await indexer.initialize();
 

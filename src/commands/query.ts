@@ -14,7 +14,7 @@ export async function runQuery(queryText: string, limit: number): Promise<void> 
   const results = await indexer.search(queryText, limit * 2);
 
   // Filter to only files in current worktree's activeFiles
-  const active = new Set(activeFiles(root));
+  const active = new Set(activeFiles(root, config.include));
 
   const filtered = results.filter((r) => {
     const rel = path.relative(root, r.filePath);
