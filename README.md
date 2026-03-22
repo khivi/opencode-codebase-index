@@ -25,6 +25,26 @@ The upstream MCP server, OpenCode plugin, and all original features are preserve
 npm install @khivi/opencode-codebase-index
 ```
 
+### Set up an embedding provider
+
+You need one embedding provider. The easiest local option:
+
+```bash
+brew install ollama            # install Ollama
+ollama pull nomic-embed-text   # pull the embedding model (~274MB)
+```
+
+Or use a cloud provider:
+
+```bash
+export OPENAI_API_KEY=sk-...   # OpenAI
+# or
+export GOOGLE_API_KEY=...      # Google
+# or have an active GitHub Copilot subscription
+```
+
+The package auto-detects whichever is available.
+
 ### Set up git hooks (one-time, per repo)
 
 ```bash
