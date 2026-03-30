@@ -283,7 +283,11 @@ export class VectorStore {
 
 // Token estimation: ~4 chars per token for code (conservative)
 const CHARS_PER_TOKEN = 4;
-const MAX_BATCH_TOKENS = 7500; // Leave buffer under 8192 API limit
+let MAX_BATCH_TOKENS = 7500; // Leave buffer under 8192 API limit
+
+export function setMaxBatchTokens(tokens: number): void {
+  MAX_BATCH_TOKENS = tokens;
+}
 const MAX_SINGLE_CHUNK_TOKENS = 2000; // Truncate individual chunks beyond this
 
 export function estimateTokens(text: string): number {

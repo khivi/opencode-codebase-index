@@ -25,6 +25,7 @@ import {
   ChunkMetadata,
   ChunkData,
   createDynamicBatches,
+  setMaxBatchTokens,
   hashFile,
   hashContent,
   extractCalls,
