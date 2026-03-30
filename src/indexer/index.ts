@@ -30,7 +30,7 @@ import {
   extractCalls,
 } from "../native/index.js";
 import type { SymbolData, CallEdgeData } from "../native/index.js";
-import { getBranchOrDefault, getBaseBranch, isGitRepo } from "../git/index.js";
+import { getBranchOrDefault, getBaseBranch, isGitRepo, getAllBranches } from "../git/index.js";
 
 const CALL_GRAPH_LANGUAGES = new Set(["typescript", "tsx", "javascript", "jsx", "python", "go", "rust"]);
 const CALL_GRAPH_SYMBOL_CHUNK_TYPES = new Set([
@@ -2704,6 +2704,27 @@ export class Indexer {
 
     // Re-validate compatibility (no stored metadata = compatible)
     this.indexCompatibility = this.validateIndexCompatibility(this.configuredProviderInfo!);
+  }
+
+  async pruneBranches(): Promise<string[]> {
+    const { database } = await this.ensureInitialized();
+
+    if (!isGitRepo(this.projectRoot)) return [];
+
+    const gitBranches = new Set(getAllBranches(this.projectRoot));
+    gitBranches.add("default"); // keep the default pseudo-branch
+    const indexedBranches = database.getAllBranches();
+    const pruned: string[] = [];
+
+    for (const branch of indexedBranches) {
+      if (!gitBranches.has(branch)) {
+        database.clearBranch(branch);
+        database.clearBranchSymbols(branch);
+        pruned.push(branch);
+      }
+    }
+
+    return pruned;
   }
 
   async healthCheck(): Promise<HealthCheckResult> {

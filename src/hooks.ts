@@ -122,6 +122,12 @@ async function main(): Promise<void> {
           `${stats.existingChunks} cached, ${stats.removedChunks} removed. ` +
           `${(stats.durationMs / 1000).toFixed(1)}s`
         );
+
+        // Prune branches that no longer exist in git
+        const pruned = await indexer.pruneBranches();
+        if (pruned.length > 0) {
+          console.log(`Pruned ${pruned.length} stale branches: ${pruned.join(", ")}`);
+        }
       }
       break;
     }
