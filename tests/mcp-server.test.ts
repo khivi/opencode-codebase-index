@@ -78,7 +78,10 @@ vi.mock("../src/indexer/index.js", () => {
       formatMetrics: vi.fn().mockReturnValue(""),
     });
   }
-  return { Indexer: MockIndexer };
+  return {
+    Indexer: MockIndexer,
+    createIndexer: (_root: string, _config: unknown) => new MockIndexer(),
+  };
 });
 
 describe("createMcpServer", () => {

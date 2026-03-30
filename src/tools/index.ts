@@ -1,6 +1,6 @@
 import { tool, type ToolDefinition } from "@opencode-ai/plugin";
 
-import { Indexer } from "../indexer/index.js";
+import { createIndexer, type Indexer } from "../indexer/index.js";
 import { ParsedCodebaseIndexConfig } from "../config/schema.js";
 import { formatCostEstimate } from "../utils/cost.js";
 import type { LogLevel } from "../config/schema.js";
@@ -21,7 +21,7 @@ const z = tool.schema;
 let sharedIndexer: Indexer | null = null;
 
 export function initializeTools(projectRoot: string, config: ParsedCodebaseIndexConfig): void {
-  sharedIndexer = new Indexer(projectRoot, config);
+  sharedIndexer = createIndexer(projectRoot, config);
 }
 
 function getIndexer(): Indexer {

@@ -1,6 +1,7 @@
 import ignore, { Ignore } from "ignore";
 import { existsSync, readFileSync, promises as fsPromises } from "fs";
 import * as path from "path";
+import { execSync } from "child_process";
 
 const PROJECT_MARKERS = [
   ".git",
@@ -61,6 +62,20 @@ export function createIgnoreFilter(projectRoot: string): Ignore {
   if (existsSync(gitignorePath)) {
     const gitignoreContent = readFileSync(gitignorePath, "utf-8");
     ig.add(gitignoreContent);
+  }
+
+  // Load .codebaseignore from main repo (if in a worktree) and from current root
+  const mainRepoRoot = getMainRepoRoot(projectRoot);
+  const ignorePaths = new Set<string>();
+  if (mainRepoRoot && mainRepoRoot !== projectRoot) {
+    ignorePaths.add(path.join(mainRepoRoot, ".codebaseignore"));
+  }
+  ignorePaths.add(path.join(projectRoot, ".codebaseignore"));
+
+  for (const p of ignorePaths) {
+    if (existsSync(p)) {
+      ig.add(readFileSync(p, "utf-8"));
+    }
   }
 
   return ig;
@@ -196,4 +211,18 @@ export async function collectFiles(
   }
 
   return { files, skipped };
+}
+
+export function getMainRepoRoot(projectRoot: string): string | null {
+  try {
+    const commonDir = execSync("git rev-parse --path-format=absolute --git-common-dir", {
+      cwd: projectRoot,
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+    }).trim();
+    // commonDir is the .git dir of the main repo — parent is the repo root
+    return path.dirname(commonDir);
+  } catch {
+    return null;
+  }
 }

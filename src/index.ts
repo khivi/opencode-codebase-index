@@ -5,7 +5,7 @@ import * as os from "os";
 import { fileURLToPath } from "url";
 
 import { parseConfig } from "./config/schema.js";
-import { Indexer } from "./indexer/index.js";
+import { createIndexer } from "./indexer/index.js";
 import { createWatcherWithIndexer } from "./watcher/index.js";
 import {
   codebase_search,
@@ -64,7 +64,7 @@ const plugin: Plugin = async ({ directory }) => {
 
   initializeTools(projectRoot, config);
 
-  const indexer = new Indexer(projectRoot, config);
+  const indexer = createIndexer(projectRoot, config);
 
   const isValidProject = !config.indexing.requireProjectMarker || hasProjectMarker(projectRoot);
 

@@ -11,7 +11,7 @@ import {
   EmbeddingProviderInterface,
   CustomProviderNonRetryableError,
 } from "../embeddings/provider.js";
-import { collectFiles, SkippedFile } from "../utils/files.js";
+import { collectFiles, SkippedFile, getMainRepoRoot } from "../utils/files.js";
 import { createCostEstimate, CostEstimate } from "../utils/cost.js";
 import { Logger, initializeLogger } from "../utils/logger.js";
 import {
@@ -1301,22 +1301,23 @@ export class Indexer {
   private indexCompatibility: IndexCompatibility | null = null;
   private indexingLockPath: string = "";
 
-  constructor(projectRoot: string, config: ParsedCodebaseIndexConfig) {
+  constructor(projectRoot: string, config: ParsedCodebaseIndexConfig, indexRoot?: string) {
     this.projectRoot = projectRoot;
     this.config = config;
-    this.indexPath = this.getIndexPath();
+    this.indexPath = this.getIndexPath(indexRoot);
     this.fileHashCachePath = path.join(this.indexPath, "file-hashes.json");
     this.failedBatchesPath = path.join(this.indexPath, "failed-batches.json");
     this.indexingLockPath = path.join(this.indexPath, "indexing.lock");
     this.logger = initializeLogger(config.debug);
   }
 
-  private getIndexPath(): string {
+  private getIndexPath(indexRoot?: string): string {
     if (this.config.scope === "global") {
       const homeDir = process.env.HOME || process.env.USERPROFILE || "";
       return path.join(homeDir, ".opencode", "global-index");
     }
-    return path.join(this.projectRoot, ".opencode", "index");
+    const root = indexRoot ?? this.projectRoot;
+    return path.join(root, ".opencode", "index");
   }
 
   private loadFileHashCache(): void {
@@ -1722,7 +1723,7 @@ export class Indexer {
     return createCostEstimate(files, configuredProviderInfo);
   }
 
-  async index(onProgress?: ProgressCallback): Promise<IndexStats> {
+  async index(onProgress?: ProgressCallback, filePaths?: string[]): Promise<IndexStats> {
     const { store, provider, invertedIndex, database, configuredProviderInfo } = await this.ensureInitialized();
 
     if (!this.indexCompatibility?.compatible) {
@@ -1760,12 +1761,39 @@ export class Indexer {
 
     this.loadFileHashCache();
 
-    const { files, skipped } = await collectFiles(
-      this.projectRoot,
-      this.config.include,
-      this.config.exclude,
-      this.config.indexing.maxFileSize
-    );
+    let files: Array<{ path: string; size: number }>;
+    let skipped: SkippedFile[];
+
+    const deletedFilePaths: string[] = [];
+
+    if (filePaths) {
+      // Fast path: only process the specified files (e.g. from git hooks)
+      files = [];
+      skipped = [];
+      for (const fp of filePaths) {
+        const fullPath = path.isAbsolute(fp) ? fp : path.join(this.projectRoot, fp);
+        if (existsSync(fullPath)) {
+          const stat = await fsPromises.stat(fullPath);
+          if (stat.size > this.config.indexing.maxFileSize) {
+            skipped.push({ path: fp, reason: "too_large" });
+          } else {
+            files.push({ path: fullPath, size: stat.size });
+          }
+        } else {
+          // File was deleted — track for chunk removal
+          deletedFilePaths.push(fullPath);
+        }
+      }
+    } else {
+      const result = await collectFiles(
+        this.projectRoot,
+        this.config.include,
+        this.config.exclude,
+        this.config.indexing.maxFileSize
+      );
+      files = result.files;
+      skipped = result.skipped;
+    }
 
     stats.totalFiles = files.length;
     stats.skippedFiles = skipped;
@@ -1998,12 +2026,30 @@ export class Indexer {
     }
 
     let removedCount = 0;
-    for (const [chunkId] of existingChunks) {
-      if (!currentChunkIds.has(chunkId)) {
-        store.remove(chunkId);
-        invertedIndex.removeChunk(chunkId);
-        removedCount++;
+    if (!filePaths) {
+      // Only remove orphaned chunks during full index — not when indexing a subset
+      for (const [chunkId] of existingChunks) {
+        if (!currentChunkIds.has(chunkId)) {
+          store.remove(chunkId);
+          invertedIndex.removeChunk(chunkId);
+          removedCount++;
+        }
       }
+    }
+
+    // Remove chunks and symbols for deleted files
+    for (const deletedPath of deletedFilePaths) {
+      const fileChunks = existingChunksByFile.get(deletedPath);
+      if (fileChunks) {
+        for (const chunkId of fileChunks) {
+          store.remove(chunkId);
+          invertedIndex.removeChunk(chunkId);
+          removedCount++;
+        }
+      }
+      database.deleteCallEdgesByFile(deletedPath);
+      database.deleteSymbolsByFile(deletedPath);
+      this.fileHashCache.delete(deletedPath);
     }
 
     stats.totalChunks = pendingChunks.length;
@@ -2023,7 +2069,11 @@ export class Indexer {
       database.addChunksToBranchBatch(this.currentBranch, Array.from(currentChunkIds));
       database.clearBranchSymbols(this.currentBranch);
       database.addSymbolsToBranchBatch(this.currentBranch, Array.from(allSymbolIds));
-      this.fileHashCache = currentFileHashes;
+      if (filePaths) {
+        for (const [k, v] of currentFileHashes) this.fileHashCache.set(k, v);
+      } else {
+        this.fileHashCache = currentFileHashes;
+      }
       this.saveFileHashCache();
       stats.durationMs = Date.now() - startTime;
       onProgress?.({
@@ -2044,7 +2094,11 @@ export class Indexer {
       database.addSymbolsToBranchBatch(this.currentBranch, Array.from(allSymbolIds));
       store.save();
       invertedIndex.save();
-      this.fileHashCache = currentFileHashes;
+      if (filePaths) {
+        for (const [k, v] of currentFileHashes) this.fileHashCache.set(k, v);
+      } else {
+        this.fileHashCache = currentFileHashes;
+      }
       this.saveFileHashCache();
       stats.durationMs = Date.now() - startTime;
       onProgress?.({
@@ -2611,6 +2665,15 @@ export class Indexer {
     };
   }
 
+  async getIndexedFiles(): Promise<Map<string, number>> {
+    const { store } = await this.ensureInitialized();
+    const fileCounts = new Map<string, number>();
+    for (const { metadata } of store.getAllMetadata()) {
+      fileCounts.set(metadata.filePath, (fileCounts.get(metadata.filePath) ?? 0) + 1);
+    }
+    return fileCounts;
+  }
+
   async clearIndex(): Promise<void> {
     const { store, invertedIndex, database } = await this.ensureInitialized();
 
@@ -2945,4 +3008,9 @@ export class Indexer {
     const { database } = await this.ensureInitialized();
     return database.getCallees(symbolId, this.currentBranch);
   }
+}
+
+export function createIndexer(projectRoot: string, config: ParsedCodebaseIndexConfig): Indexer {
+  const mainRoot = getMainRepoRoot(projectRoot) ?? projectRoot;
+  return new Indexer(projectRoot, config, mainRoot);
 }

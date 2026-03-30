@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
-import { Indexer, type IndexStats } from "./indexer/index.js";
+import { createIndexer, type IndexStats } from "./indexer/index.js";
 import type { ParsedCodebaseIndexConfig, LogLevel } from "./config/schema.js";
 import { formatCostEstimate } from "./utils/cost.js";
 import type { LogEntry } from "./utils/logger.js";
@@ -110,7 +110,7 @@ export function createMcpServer(projectRoot: string, config: ParsedCodebaseIndex
     version: "0.5.1",
   });
 
-  const indexer = new Indexer(projectRoot, config);
+  const indexer = createIndexer(projectRoot, config);
   let initialized = false;
 
   async function ensureInitialized(): Promise<void> {
