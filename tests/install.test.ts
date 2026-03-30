@@ -16,7 +16,7 @@ vi.mock("../src/git/blobsha.js", async (importOriginal) => {
   };
 });
 
-import { runInstall } from "../src/commands/install.js";
+import { runInstall } from "../src/commands/hooks-install.js";
 
 describe("install command", () => {
   let tempDir: string;

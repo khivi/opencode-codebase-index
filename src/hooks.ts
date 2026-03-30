@@ -3,7 +3,7 @@ import { execFileSync } from "child_process";
 import { repoRoot } from "./git/blobsha.js";
 import { parseConfig } from "./config/schema.js";
 import { createIndexer } from "./indexer/index.js";
-import { runInstall } from "./commands/install.js";
+import { runInstall } from "./commands/hooks-install.js";
 import { loadPluginConfig } from "./commands/config-loader.js";
 
 function usage(): void {
