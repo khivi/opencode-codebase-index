@@ -3,20 +3,22 @@ import * as path from "path";
 import { execSync } from "child_process";
 import { repoRoot } from "../git/blobsha.js";
 
+const LOG = '"$REPO_ROOT/.opencode/index/hooks.log"';
+
 const HOOKS: Record<string, string> = {
   "post-commit": `#!/bin/sh
-REPO_ROOT=$(git rev-parse --show-toplevel) && node "$REPO_ROOT/node_modules/.bin/codebase-index" index --diff HEAD~1 HEAD &
+REPO_ROOT=$(git rev-parse --show-toplevel) && node "$REPO_ROOT/node_modules/.bin/codebase-index" index --diff HEAD~1 HEAD >> ${LOG} 2>&1 &
 `,
   "post-merge": `#!/bin/sh
-REPO_ROOT=$(git rev-parse --show-toplevel) && node "$REPO_ROOT/node_modules/.bin/codebase-index" index --diff ORIG_HEAD HEAD &
+REPO_ROOT=$(git rev-parse --show-toplevel) && node "$REPO_ROOT/node_modules/.bin/codebase-index" index --diff ORIG_HEAD HEAD >> ${LOG} 2>&1 &
 `,
   "post-rewrite": `#!/bin/sh
-REPO_ROOT=$(git rev-parse --show-toplevel) && node "$REPO_ROOT/node_modules/.bin/codebase-index" index --diff ORIG_HEAD HEAD &
+REPO_ROOT=$(git rev-parse --show-toplevel) && node "$REPO_ROOT/node_modules/.bin/codebase-index" index --diff ORIG_HEAD HEAD >> ${LOG} 2>&1 &
 `,
   "post-checkout": `#!/bin/sh
 # Only run on branch switch (not file checkout)
 [ "$3" = "1" ] || exit 0
-REPO_ROOT=$(git rev-parse --show-toplevel) && node "$REPO_ROOT/node_modules/.bin/codebase-index" index --diff "$1" "$2" &
+REPO_ROOT=$(git rev-parse --show-toplevel) && node "$REPO_ROOT/node_modules/.bin/codebase-index" index --diff "$1" "$2" >> ${LOG} 2>&1 &
 `,
 };
 
