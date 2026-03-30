@@ -1282,6 +1282,7 @@ function unionCandidates(
 export class Indexer {
   private config: ParsedCodebaseIndexConfig;
   private projectRoot: string;
+  private mainRepoRoot: string;
   private indexPath: string;
   private store: VectorStore | null = null;
   private invertedIndex: InvertedIndex | null = null;
@@ -1303,6 +1304,7 @@ export class Indexer {
 
   constructor(projectRoot: string, config: ParsedCodebaseIndexConfig, indexRoot?: string) {
     this.projectRoot = projectRoot;
+    this.mainRepoRoot = indexRoot ?? projectRoot;
     this.config = config;
     this.indexPath = this.getIndexPath(indexRoot);
     this.fileHashCachePath = path.join(this.indexPath, "file-hashes.json");
@@ -1766,6 +1768,10 @@ export class Indexer {
 
     const deletedFilePaths: string[] = [];
 
+    // Paths stored in the index are relative to mainRepoRoot so chunks are
+    // worktree-agnostic.  We resolve back to absolute only for disk I/O.
+    const toRelative = (absPath: string) => path.relative(this.mainRepoRoot, absPath);
+
     if (filePaths) {
       // Fast path: only process the specified files (e.g. from git hooks)
       files = [];
@@ -1780,8 +1786,8 @@ export class Indexer {
             files.push({ path: fullPath, size: stat.size });
           }
         } else {
-          // File was deleted — track for chunk removal
-          deletedFilePaths.push(fullPath);
+          // File was deleted — track for chunk removal (relative path)
+          deletedFilePaths.push(path.isAbsolute(fp) ? toRelative(fp) : fp);
         }
       }
     } else {
@@ -1809,15 +1815,16 @@ export class Indexer {
     const currentFileHashes = new Map<string, string>();
 
     for (const f of files) {
+      const relPath = toRelative(f.path);
       const currentHash = hashFile(f.path);
-      currentFileHashes.set(f.path, currentHash);
+      currentFileHashes.set(relPath, currentHash);
 
-      if (this.fileHashCache.get(f.path) === currentHash) {
-        unchangedFilePaths.add(f.path);
+      if (this.fileHashCache.get(relPath) === currentHash) {
+        unchangedFilePaths.add(relPath);
         this.logger.recordCacheHit();
       } else {
         const content = await fsPromises.readFile(f.path, "utf-8");
-        changedFiles.push({ path: f.path, content, hash: currentHash });
+        changedFiles.push({ path: relPath, content, hash: currentHash });
         this.logger.recordCacheMiss();
       }
     }
@@ -1872,8 +1879,7 @@ export class Indexer {
       currentFilePaths.add(parsed.path);
 
       if (parsed.chunks.length === 0) {
-        const relativePath = path.relative(this.projectRoot, parsed.path);
-        stats.parseFailures.push(relativePath);
+        stats.parseFailures.push(parsed.path);
       }
 
       let fileChunkCount = 0;
@@ -2591,10 +2597,8 @@ export class Indexer {
 
         if (!metadataOnly && this.config.search.includeContext) {
           try {
-            const fileContent = await fsPromises.readFile(
-              r.metadata.filePath,
-              "utf-8"
-            );
+            const absPath = path.join(this.projectRoot, r.metadata.filePath);
+            const fileContent = await fsPromises.readFile(absPath, "utf-8");
             const lines = fileContent.split("\n");
             const contextLines = options?.contextLines ?? this.config.search.contextLines;
 
@@ -2610,7 +2614,7 @@ export class Indexer {
         }
 
         return {
-          filePath: r.metadata.filePath,
+          filePath: path.join(this.projectRoot, r.metadata.filePath),
           startLine: contextStartLine,
           endLine: contextEndLine,
           content,
@@ -2720,7 +2724,7 @@ export class Indexer {
     let removedCount = 0;
 
     for (const [filePath, chunkKeys] of filePathsToChunkKeys) {
-      if (!existsSync(filePath)) {
+      if (!existsSync(path.join(this.projectRoot, filePath))) {
         for (const key of chunkKeys) {
           store.remove(key);
           invertedIndex.removeChunk(key);
@@ -2973,10 +2977,8 @@ export class Indexer {
 
         if (this.config.search.includeContext) {
           try {
-            const fileContent = await fsPromises.readFile(
-              r.metadata.filePath,
-              "utf-8"
-            );
+            const absPath = path.join(this.projectRoot, r.metadata.filePath);
+            const fileContent = await fsPromises.readFile(absPath, "utf-8");
             const lines = fileContent.split("\n");
             content = lines
               .slice(r.metadata.startLine - 1, r.metadata.endLine)
@@ -2987,7 +2989,7 @@ export class Indexer {
         }
 
         return {
-          filePath: r.metadata.filePath,
+          filePath: path.join(this.projectRoot, r.metadata.filePath),
           startLine: r.metadata.startLine,
           endLine: r.metadata.endLine,
           content,

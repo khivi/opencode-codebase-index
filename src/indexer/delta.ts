@@ -20,7 +20,8 @@ export async function buildDeltaIndexes(
   indexPath: string,
   branch: string,
   baseBranch: string,
-  dimensions: number
+  dimensions: number,
+  projectRoot?: string
 ): Promise<DeltaInfo> {
   const delta = database.getBranchDelta(branch, baseBranch);
   
@@ -51,7 +52,7 @@ export async function buildDeltaIndexes(
       hash: chunk.contentHash,
     });
 
-    const chunkContent = getChunkContent(chunk);
+    const chunkContent = getChunkContent(chunk, projectRoot);
     if (chunkContent) {
       invertedIndex.addChunk(chunkId, chunkContent);
     }
@@ -115,9 +116,10 @@ function bufferToFloat32Array(buf: Buffer): Float32Array {
   return new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
 }
 
-function getChunkContent(chunk: ChunkData): string | null {
+function getChunkContent(chunk: ChunkData, projectRoot?: string): string | null {
   try {
-    const content = readFileSync(chunk.filePath, "utf-8");
+    const filePath = projectRoot ? path.join(projectRoot, chunk.filePath) : chunk.filePath;
+    const content = readFileSync(filePath, "utf-8");
     const lines = content.split("\n");
     return lines.slice(chunk.startLine - 1, chunk.endLine).join("\n");
   } catch {

@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import * as path from "path";
 import { execFileSync } from "child_process";
 import { repoRoot, activeFiles, blobSha, loadHashes, saveHashes } from "./git/blobsha.js";
 import { parseConfig } from "./config/schema.js";
@@ -196,10 +195,7 @@ async function main(): Promise<void> {
         }
 
         const sorted = [...fileCounts.entries()]
-          .filter(([fp]) => {
-            const rel = path.relative(mainRoot, fp);
-            return fileFilter ? fileFilter.has(rel) : true;
-          })
+          .filter(([fp]) => fileFilter ? fileFilter.has(fp) : true)
           .sort((a, b) => a[0].localeCompare(b[0]));
 
         const label = isWorktree
@@ -207,8 +203,7 @@ async function main(): Promise<void> {
           : "Indexed files";
         console.log(`\n${label} (${sorted.length}):`);
         for (const [filePath, chunks] of sorted) {
-          const rel = path.relative(mainRoot, filePath);
-          console.log(`  ${rel}  (${chunks} chunks)`);
+          console.log(`  ${filePath}  (${chunks} chunks)`);
         }
       }
       break;
