@@ -180,13 +180,19 @@ Place in the main repo root. Worktrees can have their own `.codebaseignore` too 
 
 ## How it works
 
-1. **Parsing** — tree-sitter (Rust) splits code into semantic chunks (functions, classes, interfaces)
-2. **Embedding** — chunks vectorized via your provider, cached by content hash
-3. **Storage** — usearch vectors (F16), SQLite metadata, BM25 inverted index
-4. **Branch tagging** — chunks tagged per branch, unchanged files shared across branches
-5. **Search** — hybrid semantic + keyword, RRF fusion, filtered by current branch
-6. **Hooks** — `--diff` passes exact changed refs, only re-embeds modified files
-7. **Pruning** — stale branches cleaned up automatically during index
+Upstream:
+1. **Parsing** — tree-sitter (Rust native) splits code into semantic chunks (functions, classes, interfaces)
+2. **Embedding** — chunks are vectorized via your configured provider
+3. **Storage** — vectors in usearch (F16), metadata in SQLite, keywords in BM25 inverted index
+4. **Search** — hybrid semantic + keyword retrieval, RRF fusion, deterministic reranking
+5. **Incremental** — file hash cache tracks changes, only re-embeds what changed
+6. **Branch-aware** — embedding reuse across branches, call graph extraction
+
+This fork adds:
+7. **Relative paths** — index stores `src/foo.ts` not `/worktree-a/src/foo.ts`, enabling chunk dedup across worktrees
+8. **Shared index** — all worktrees read/write one index in the main repo via `git-common-dir`
+9. **Git hooks** — `--diff` passes exact changed refs per hook type, only re-embeds modified files
+10. **Branch pruning** — stale branches cleaned up automatically during `index`
 
 ## License
 
