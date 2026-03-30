@@ -22,11 +22,17 @@ Internal (used by hooks):
 All commands except 'index --diff' must be run from the main repo, not a worktree.`);
 }
 
-function progressCallback(progress: { phase: string; chunksProcessed: number; totalChunks: number }): void {
-  if (progress.phase === "embedding" && progress.totalChunks > 0) {
+function progressCallback(progress: { phase: string; filesProcessed: number; totalFiles: number; chunksProcessed: number; totalChunks: number }): void {
+  if (progress.phase === "scanning") {
+    process.stdout.write(`\rScanning files...`);
+  } else if (progress.phase === "parsing") {
+    process.stdout.write(`\rParsing ${progress.totalFiles} files...`);
+  } else if (progress.phase === "embedding" && progress.totalChunks > 0) {
     process.stdout.write(
       `\rEmbedding: ${progress.chunksProcessed}/${progress.totalChunks} chunks`
     );
+  } else if (progress.phase === "complete") {
+    process.stdout.write("\r");
   }
 }
 
