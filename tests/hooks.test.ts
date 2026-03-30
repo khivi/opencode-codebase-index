@@ -77,8 +77,10 @@ describe("git-cli argument parsing", () => {
 
   describe("command routing", () => {
     const VALID_COMMANDS = [
-      "init",
+      "install",
       "index",
+      "serve",
+      "status",
     ];
 
     it("should recognize all valid commands", () => {
