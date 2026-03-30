@@ -3,17 +3,40 @@
 [![npm version](https://img.shields.io/npm/v/@khivi/opencode-codebase-index.svg)](https://www.npmjs.com/package/@khivi/opencode-codebase-index)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-> Fork of [opencode-codebase-index](https://github.com/Helweg/opencode-codebase-index) — adds git-native CLI, worktree support, and shared indexing
+> Fork of [opencode-codebase-index](https://github.com/Helweg/opencode-codebase-index) — adds worktree support with shared indexing
 
-Semantic codebase indexing and search. Works as an **MCP server** (Claude Code, Cursor, Windsurf) and a standalone **CLI** with git hooks for automatic incremental indexing.
+Semantic codebase indexing and search. The upstream project already understands git branches — this fork extends it to understand **worktrees** (separate directories for parallel branch work) while keeping a single shared index in the main repo.
 
-## What this fork adds
+## Architecture
 
-- **Shared index across worktrees** — index lives in the main repo, all worktrees share it
-- **Git hook integration** — automatic background reindexing via `--diff` (only changed files)
-- **Worktree-scoped queries** — results filtered to the current worktree's files
-- **`.codebaseignore`** — exclude files from indexing without untracking from git
-- **Standalone CLI** — `codebase-index` runs without an MCP host
+```
+main-repo/
+├── .opencode/index/           # single shared index
+│   ├── codebase.db            # SQLite: chunks, embeddings, branch tags, call graph
+│   ├── vectors.usearch        # vector index
+│   ├── inverted-index.json    # BM25 keyword index
+│   └── file-hashes.json       # incremental change tracking
+├── .git/hooks/                # shared hooks (via --git-common-dir)
+│   ├── post-commit
+│   ├── post-merge
+│   ├── post-rewrite
+│   └── post-checkout
+└── src/...
+
+worktree-a/  (branch: feature-x)
+└── src/...  # no .opencode/ — reads/writes the main repo's index
+
+worktree-b/  (branch: feature-y)
+└── src/...  # same shared index, different branch tag
+```
+
+**How it works:**
+- Paths in the index are **relative** (`src/foo.ts`), so the same file across worktrees produces the same chunk ID
+- Unchanged files share chunks across branches (deduped by content hash)
+- Changed files get their own chunks, tagged with the branch name
+- Queries filter by `currentBranch` — each worktree sees only its branch's chunks
+- Hooks fire from any worktree and update the shared index via `--diff`
+- Stale branches are pruned automatically during `index`
 
 ## Setup
 
@@ -27,9 +50,9 @@ npm install -g @khivi/opencode-codebase-index
 
 Create `~/.config/opencode/codebase-index.json` (global) or `.opencode/codebase-index.json` (per-repo):
 
-**Custom / local provider (recommended for large codebases):**
+**Local provider (recommended):**
 
-Any OpenAI-compatible embeddings endpoint works. Examples: Ollama, llama.cpp, vLLM, MLX, LiteLLM.
+Any OpenAI-compatible embeddings endpoint — Ollama, llama.cpp, vLLM, MLX, LiteLLM:
 
 ```json
 {
@@ -42,31 +65,11 @@ Any OpenAI-compatible embeddings endpoint works. Examples: Ollama, llama.cpp, vL
 }
 ```
 
-With Ollama:
 ```bash
-brew install ollama
-ollama pull nomic-embed-text
-```
-
-With MLX (Apple Silicon):
-```json
-{
-  "embeddingProvider": "custom",
-  "customProvider": {
-    "baseUrl": "http://127.0.0.1:11434/v1",
-    "model": "mlx-community/nomicai-modernbert-embed-base-4bit",
-    "dimensions": 768
-  }
-}
+brew install ollama && ollama pull nomic-embed-text
 ```
 
 **Cloud providers:**
-
-```json
-{ "embeddingProvider": "openai" }
-```
-
-Set the corresponding environment variable:
 
 | Provider | Config | Env var |
 |----------|--------|---------|
@@ -75,19 +78,28 @@ Set the corresponding environment variable:
 | GitHub Copilot | `"github-copilot"` | Active subscription |
 | Auto-detect | `"auto"` (default) | Tries all in order |
 
-**Custom provider options:**
+**Custom provider fields:**
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `baseUrl` | yes | OpenAI-compatible endpoint (must end with `/v1`) |
-| `model` | yes | Model name sent in API request |
-| `dimensions` | yes | Vector dimensions the model produces |
-| `apiKey` | no | API key (if endpoint requires auth) |
+| `baseUrl` | yes | Endpoint URL (must end with `/v1`) |
+| `model` | yes | Model name |
+| `dimensions` | yes | Vector dimensions |
+| `apiKey` | no | Auth key |
 | `maxTokens` | no | Max tokens per chunk (default: 8192) |
 | `concurrency` | no | Parallel requests (default: 10) |
-| `requestIntervalMs` | no | Rate limit interval in ms |
 
-### 3. Set up the MCP server (Claude Code / Cursor)
+### 3. Build the index and install hooks (from main repo)
+
+```bash
+cd /path/to/main-repo
+codebase-index install     # install git hooks
+codebase-index index       # build initial index (incremental on subsequent runs)
+```
+
+Hooks are shared across all worktrees (installed via `--git-common-dir`). After this, indexing happens automatically on commit, merge, rebase, and branch switch.
+
+### 4. Set up the MCP server
 
 **Claude Code** — add to `~/.claude/.mcp.json`:
 
@@ -115,130 +127,66 @@ Set the corresponding environment variable:
 }
 ```
 
-The MCP server keeps the index hot in memory — no reload cost between queries.
+The MCP server keeps the index hot in memory. Each worktree session starts its own MCP server pointing to its root — it reads the shared index but resolves file paths to the worktree.
 
-**MCP tools exposed:** `codebase_search`, `codebase_peek`, `find_similar`, `call_graph`, `index_codebase`, `index_status`, `index_health_check`, `index_metrics`, `index_logs`.
-
-### 4. Install git hooks (per repo)
-
-```bash
-codebase-index install          # install hooks
-codebase-index install --force  # overwrite existing hooks
-```
-
-Installs hooks in `.git/hooks/` (worktree-aware via `--git-common-dir`):
-
-| Hook | Trigger | Diff refs |
-|------|---------|-----------|
-| `post-commit` | After commit | `HEAD~1 HEAD` |
-| `post-merge` | After merge/pull | `ORIG_HEAD HEAD` |
-| `post-rewrite` | After rebase | `ORIG_HEAD HEAD` |
-| `post-checkout` | Branch switch | `$old $new` |
-
-All hooks run `codebase-index index --diff <old> <new>` in the background — only re-indexes the changed files.
-
-### 5. Build the initial index
-
-```bash
-codebase-index index --force    # first-time full index
-```
-
-After that, hooks keep it updated automatically.
+**MCP tools:** `codebase_search`, `codebase_peek`, `find_similar`, `call_graph`, `index_codebase`, `index_status`, `index_health_check`, `index_metrics`, `index_logs`.
 
 ## CLI Commands
 
-```
-codebase-index install [--force]      Install git hooks (--force overwrites)
-codebase-index index [options]        Index the codebase (incremental by default)
-codebase-index status [--files]       Show index status (--files lists indexed files)
-```
-
-Search is done via the MCP server (Claude Code, Cursor) — no CLI query command needed.
-
-**Index options:**
-- `--force` — full reindex (ignore caches)
-- `--diff <old> <new>` — only index files changed between two refs (used by hooks)
-
-**Status in worktrees:**
-- Shows worktree/main repo paths
-- `--files` lists only files changed from base branch (not all 8000+ files)
-
-## Worktree support
-
-The index is stored in the **main repo's** `.opencode/index/` and shared across all worktrees:
+Run from the **main repo** (not a worktree):
 
 ```
-main-repo/.opencode/index/     # shared index (vectors, SQLite, keywords)
-├── codebase.db
-├── vectors.usearch
-├── inverted-index.json
-└── file-hashes.json
-
-worktree-a/                    # no .opencode/ here — uses main repo's
-worktree-b/                    # same — shared index
+codebase-index install [--force]   Install git hooks (--force overwrites existing)
+codebase-index index [--force]     Index the codebase (--force rebuilds from scratch)
+codebase-index serve [--restart]   Start MCP server (--restart kills existing first)
+codebase-index status              Show index status
 ```
 
-- **Indexing** from any worktree writes to the shared index
-- **Querying** scopes results to the worktree's `git ls-files`
-- **Hooks** pass `--diff` with exact changed refs — fast, no full scan
-- **MCP server** also uses the shared index (via `createIndexer`)
+Hooks call `codebase-index index --diff <old> <new>` internally — this is the only command that runs from worktrees.
 
 ## .codebaseignore
 
-Create `.codebaseignore` in the repo root (same syntax as `.gitignore`) to exclude tracked files from indexing:
+Exclude tracked files from indexing (`.gitignore` syntax):
 
 ```
-# Exclude generated code
-src/generated/
-*.gen.ts
-
-# Exclude archived docs
 wiki/old/
-
-# Exclude test fixtures
+src/generated/
 tests/fixtures/large/
 ```
 
-Both main repo and worktree `.codebaseignore` files are loaded (rules stack).
+Place in the main repo root. Worktrees can have their own `.codebaseignore` too — rules stack.
 
-## Configuration reference
+## Configuration
 
 `.opencode/codebase-index.json` (project) or `~/.config/opencode/codebase-index.json` (global):
 
 ```json
 {
   "embeddingProvider": "auto",
-  "embeddingModel": "text-embedding-3-small",
   "customProvider": { ... },
-  "scope": "project",
   "indexing": {
-    "autoIndex": false,
-    "watchFiles": true,
     "maxFileSize": 1048576,
     "maxChunksPerFile": 100,
-    "semanticOnly": false,
-    "retries": 3,
-    "retryDelayMs": 1000
+    "semanticOnly": false
   },
   "search": {
     "maxResults": 20,
     "minScore": 0.1,
     "hybridWeight": 0.5,
-    "fusionStrategy": "rrf",
-    "contextLines": 3,
-    "includeContext": true
+    "contextLines": 3
   }
 }
 ```
 
 ## How it works
 
-1. **Parsing** — tree-sitter (Rust native) splits code into semantic chunks (functions, classes, interfaces)
-2. **Embedding** — chunks are vectorized via your configured provider
-3. **Storage** — vectors in usearch (F16), metadata in SQLite, keywords in BM25 inverted index
-4. **Search** — hybrid semantic + keyword retrieval, RRF fusion, deterministic reranking
-5. **Incremental** — blob SHAs track changes, only re-embeds what changed
-6. **Branch-aware** — embedding reuse across branches, call graph extraction
+1. **Parsing** — tree-sitter (Rust) splits code into semantic chunks (functions, classes, interfaces)
+2. **Embedding** — chunks vectorized via your provider, cached by content hash
+3. **Storage** — usearch vectors (F16), SQLite metadata, BM25 inverted index
+4. **Branch tagging** — chunks tagged per branch, unchanged files shared across branches
+5. **Search** — hybrid semantic + keyword, RRF fusion, filtered by current branch
+6. **Hooks** — `--diff` passes exact changed refs, only re-embeds modified files
+7. **Pruning** — stale branches cleaned up automatically during index
 
 ## License
 
