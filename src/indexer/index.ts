@@ -2151,6 +2151,9 @@ export class Indexer {
     }
 
     const providerRateLimits = this.getProviderRateLimits(configuredProviderInfo.provider);
+    if (this.config.customProvider?.batchTokens) {
+      setMaxBatchTokens(this.config.customProvider.batchTokens);
+    }
     const queue = new PQueue({
       concurrency: providerRateLimits.concurrency,
       interval: providerRateLimits.intervalMs,

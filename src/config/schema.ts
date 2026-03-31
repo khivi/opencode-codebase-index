@@ -65,6 +65,8 @@ export interface CustomProviderConfig {
   concurrency?: number;
   /** Minimum delay between requests in milliseconds (default: 1000). Set to 0 for local servers. */
   requestIntervalMs?: number;
+  /** Max tokens per embedding batch/request (default: 7500). Larger batches = fewer requests = higher GPU utilization on local servers. */
+  batchTokens?: number;
 }
 
 export interface CodebaseIndexConfig {
@@ -221,6 +223,7 @@ export function parseConfig(raw: unknown): ParsedCodebaseIndexConfig {
         timeoutMs: typeof rawCustom.timeoutMs === 'number' ? Math.max(1000, rawCustom.timeoutMs) : undefined,
         concurrency: typeof rawCustom.concurrency === 'number' ? Math.max(1, Math.floor(rawCustom.concurrency)) : undefined,
         requestIntervalMs: typeof rawCustom.requestIntervalMs === 'number' ? Math.max(0, Math.floor(rawCustom.requestIntervalMs)) : undefined,
+        batchTokens: typeof rawCustom.batchTokens === 'number' ? Math.max(1000, Math.floor(rawCustom.batchTokens)) : undefined,
       };
       // Warn if baseUrl doesn't end with an API version path like /v1.
       // Note: using console.warn here because Logger isn't initialized yet at config parse time.
